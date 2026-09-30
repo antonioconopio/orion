@@ -1,0 +1,5 @@
+DROP TABLE IF EXISTS task_instances;
+DROP TABLE IF EXISTS runs;
+DROP TABLE IF EXISTS task_dependencies;
+DROP TABLE IF EXISTS tasks;
+DROP TABLE IF EXISTS dags;
