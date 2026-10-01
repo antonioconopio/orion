@@ -12,6 +12,7 @@ import (
 
 	"orion-api/internal/db"
 	"orion-api/internal/handlers"
+	"orion-api/internal/queue"
 
 	_ "orion-api/docs"
 
@@ -49,8 +50,13 @@ func main() {
 	}
 	defer pool.Close()
 
+	queue, err := queue.NewStream(ctx, os.Getenv("REDIS_ADDR"), os.Getenv("STREAM_NAME"), os.Getenv("CONSUMER_GROUP"), 1000)
+	if err != nil {
+		log.Fatalf("failed to create queue: %v", err)
+	}
+
 	mux := http.NewServeMux()
-	handlers.RegisterRoutes(mux, pool)
+	handlers.RegisterRoutes(mux, pool, queue)
 
 	// Swagger docs endpoint
 	mux.Handle("GET /swagger/", httpSwagger.WrapHandler)

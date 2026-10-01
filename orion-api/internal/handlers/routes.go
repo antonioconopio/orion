@@ -2,16 +2,17 @@ package handlers
 
 import (
 	"net/http"
+	"orion-api/internal/queue"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // RegisterRoutes wires every API endpoint onto mux. It lives here (rather
 // than in main) so tests exercise the exact same routing table as prod.
-func RegisterRoutes(mux *http.ServeMux, pool *pgxpool.Pool) {
+func RegisterRoutes(mux *http.ServeMux, pool *pgxpool.Pool, queue *queue.Stream) {
 	dagHandler := NewDAGHandler(pool)
 	taskHandler := NewTaskHandler(pool)
-	runHandler := NewRunHandler(pool)
+	runHandler := NewRunHandler(pool, queue)
 	taskInstanceHandler := NewTaskInstanceHandler(pool)
 
 	// Health endpoint
