@@ -8,14 +8,22 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"orion-api/internal/models"
+	"orion-api/internal/queue"
 )
 
 type RunHandler struct {
 	DB *pgxpool.Pool
+	Queue *queue.Stream
 }
 
-func NewRunHandler(db *pgxpool.Pool) *RunHandler {
-	return &RunHandler{DB: db}
+func NewRunHandler(db *pgxpool.Pool, queue *queue.Stream) *RunHandler {
+	return &RunHandler{DB: db, Queue: queue}
+}
+
+type TriggerRunResponse struct {
+	Run           models.Run            `json:"run"`
+	TaskInstances []models.TaskInstance `json:"task_instances"`
+	Enqueued      []string              `json:"enqueued"`
 }
 
 // List godoc
@@ -162,5 +170,41 @@ func (h *RunHandler) Trigger(w http.ResponseWriter, r *http.Request) {
 		task_instances = append(task_instances, taskInstance)
 	}
 
-	writeJSON(w, http.StatusCreated, run)
+	var readySet []uuid.UUID
+	for _, task:= range tasks {
+		var id uuid.UUID
+		err = h.DB.QueryRow(r.Context(), `
+			SELECT id
+			FROM task_instances
+			WHERE run_id = $1 
+			AND task_id = $2
+			AND NOT EXISTS (
+				SELECT 1
+				FROM task_dependencies td
+				WHERE td.task_id = $2)
+		`, run.ID, task.ID).Scan(&id)
+
+		if err == pgx.ErrNoRows{
+			continue
+		}
+		
+		if err != nil {
+			http.Error(w, "failed to query ready tasks", http.StatusInternalServerError)
+			return
+		}
+		readySet = append(readySet, id)
+	}
+
+	var enqueResults []string
+	for _, id := range readySet {
+		msg, err := h.Queue.Enqueue(r.Context(), id.String())
+
+		if err != nil {
+			http.Error(w, "failed to enqueue tasks", http.StatusInternalServerError)
+			return
+		}
+		enqueResults = append(enqueResults, msg)
+	}
+	
+	writeJSON(w, http.StatusCreated, TriggerRunResponse{Run: run, TaskInstances: task_instances, Enqueued: enqueResults})
 }
