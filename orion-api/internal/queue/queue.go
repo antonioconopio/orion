@@ -51,7 +51,9 @@ type Stream struct {
 //       propagate.
 func NewStream(ctx context.Context, addr, name, group string, maxLen int64) (*Stream, error) {
 
-	redisClient := redis.NewClient(&redis.Options{Addr: addr})
+	redisClient := redis.NewClient(&redis.Options{
+										Addr: addr,
+										ContextTimeoutEnabled: true})
 
 	err := redisClient.Ping(ctx).Err()
 	if err != nil {

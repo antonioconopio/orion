@@ -176,12 +176,18 @@ func (h *RunHandler) Trigger(w http.ResponseWriter, r *http.Request) {
 		err = h.DB.QueryRow(r.Context(), `
 			SELECT id
 			FROM task_instances
-			WHERE run_id = $1 AND NOT EXISTS (
+			WHERE run_id = $1 
+			AND task_id = $2
+			AND NOT EXISTS (
 				SELECT 1
 				FROM task_dependencies td
 				WHERE td.task_id = $2)
 		`, run.ID, task.ID).Scan(&id)
 
+		if err == pgx.ErrNoRows{
+			continue
+		}
+		
 		if err != nil {
 			http.Error(w, "failed to query ready tasks", http.StatusInternalServerError)
 			return

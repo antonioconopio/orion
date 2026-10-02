@@ -3,6 +3,7 @@ package tests
 import (
 	"encoding/json"
 	"net/http"
+	"sort"
 	"testing"
 )
 
@@ -287,6 +288,102 @@ func TestRunTrigger(t *testing.T) {
 	}
 	if !seen[t1.ID] || !seen[t2.ID] {
 		t.Fatalf("task instances don't cover both tasks: %+v", tis)
+	}
+}
+
+func TestRunTriggerResponseShape(t *testing.T) {
+	c := newAPI(t)
+	d := c.createDAG("d")
+	c.createTask(d.ID, "a")
+
+	status, raw := c.do("POST", "/dags/"+d.ID+"/runs", nil)
+	if status != http.StatusCreated {
+		t.Fatalf("status = %d (%s)", status, raw)
+	}
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &top); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"run", "task_instances", "enqueued"} {
+		if _, ok := top[k]; !ok {
+			t.Fatalf("response missing %q: %s", k, raw)
+		}
+	}
+}
+
+// Every task without dependencies must be enqueued exactly once, and the
+// enqueued messages must be those task instances.
+func TestRunTriggerEnqueuesEachIndependentTaskInstanceOnce(t *testing.T) {
+	c := newAPI(t)
+	d := c.createDAG("d")
+	c.createTask(d.ID, "a")
+	c.createTask(d.ID, "b")
+	c.createTask(d.ID, "c")
+
+	trig := c.trigger(d.ID)
+	if len(trig.TaskInstances) != 3 {
+		t.Fatalf("task instances = %d, want 3", len(trig.TaskInstances))
+	}
+	if len(trig.Enqueued) != 3 {
+		t.Fatalf("enqueued message ids = %d, want 3", len(trig.Enqueued))
+	}
+
+	var want []string
+	for _, ti := range trig.TaskInstances {
+		want = append(want, ti.ID)
+	}
+	got := c.streamTaskInstanceIDs()
+	sort.Strings(want)
+	sort.Strings(got)
+	if !equal(got, want) {
+		t.Fatalf("stream holds %v, want each task instance once: %v", got, want)
+	}
+
+	// The returned ids are real stream message ids, in stream order.
+	msgs, _ := c.rc.XRange(t.Context(), c.streamName, "-", "+").Result()
+	for i, m := range msgs {
+		if trig.Enqueued[i] != m.ID {
+			t.Fatalf("enqueued[%d] = %s, stream has %s", i, trig.Enqueued[i], m.ID)
+		}
+	}
+}
+
+// Only tasks whose dependencies are met (here: none) are enqueued; the
+// dependent task instance stays pending until its upstream finishes.
+func TestRunTriggerOnlyEnqueuesTasksWithoutDependencies(t *testing.T) {
+	c := newAPI(t)
+	d := c.createDAG("d")
+	extract := c.createTask(d.ID, "extract")
+	load := c.createTask(d.ID, "load")
+	c.addDependency(load.ID, extract.ID)
+
+	trig := c.trigger(d.ID)
+	if len(trig.TaskInstances) != 2 {
+		t.Fatalf("task instances = %d, want 2", len(trig.TaskInstances))
+	}
+	var extractTI string
+	for _, ti := range trig.TaskInstances {
+		if ti.TaskID == extract.ID {
+			extractTI = ti.ID
+		}
+	}
+
+	got := c.streamTaskInstanceIDs()
+	if len(got) != 1 || got[0] != extractTI {
+		t.Fatalf("stream holds %v, want only extract's instance [%s]", got, extractTI)
+	}
+}
+
+func TestRunTriggerEmptyDAGEnqueuesNothing(t *testing.T) {
+	c := newAPI(t)
+	d := c.createDAG("empty")
+
+	trig := c.trigger(d.ID)
+	if len(trig.TaskInstances) != 0 || len(trig.Enqueued) != 0 {
+		t.Fatalf("expected nothing, got %+v", trig)
+	}
+	if got := c.streamTaskInstanceIDs(); len(got) != 0 {
+		t.Fatalf("stream should be empty, has %v", got)
 	}
 }
 

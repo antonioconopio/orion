@@ -30,6 +30,7 @@ import (
 
 	"orion-api/internal/db"
 	"orion-api/internal/handlers"
+	"orion-api/internal/queue"
 )
 
 const migrationPath = "../../migrations/000001_init_schema.up.sql"
@@ -138,23 +139,35 @@ func ensureSchema(ctx context.Context, pool *pgxpool.Pool) (*pgxpool.Pool, error
 // apiClient is a tiny JSON client against an httptest server running the
 // real routing table.
 type apiClient struct {
-	t    *testing.T
-	srv  *httptest.Server
-	pool *pgxpool.Pool
+	t          *testing.T
+	srv        *httptest.Server
+	pool       *pgxpool.Pool
+	stream     *queue.Stream // the queue the API enqueues onto
+	streamName string
+	rc         *redis.Client // raw client for inspecting the stream
 }
 
-// newAPI starts the API on a clean database.
+// testGroup is the consumer group used on every test stream.
+const testGroup = "orion:test-workers"
+
+// newAPI starts the API on a clean database and a private Redis stream.
 func newAPI(t *testing.T) *apiClient {
 	t.Helper()
 	pool := sharedPool(t)
+	rc := redisClient(t)
+	streamName := uniqueStreamName(t, rc)
+	stream, err := queue.NewStream(context.Background(), redisAddr(), streamName, testGroup, 1000)
+	if err != nil {
+		t.Fatalf("NewStream: %v", err)
+	}
 	if _, err := pool.Exec(context.Background(), `TRUNCATE dags, tasks, task_dependencies, runs, task_instances CASCADE`); err != nil {
 		t.Fatalf("truncate: %v", err)
 	}
 	mux := http.NewServeMux()
-	handlers.RegisterRoutes(mux, pool)
+	handlers.RegisterRoutes(mux, pool, stream)
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	return &apiClient{t: t, srv: srv, pool: pool}
+	return &apiClient{t: t, srv: srv, pool: pool, stream: stream, streamName: streamName, rc: rc}
 }
 
 // do sends a request. body may be nil, a string (sent raw) or any
@@ -259,11 +272,47 @@ func (c *apiClient) createTask(dagID, name string) taskResp {
 	return tk
 }
 
-func (c *apiClient) triggerRun(dagID string) runResp {
+// triggerResp mirrors handlers.TriggerRunResponse.
+type triggerResp struct {
+	Run           runResp            `json:"run"`
+	TaskInstances []taskInstanceResp `json:"task_instances"`
+	Enqueued      []string           `json:"enqueued"`
+}
+
+func (c *apiClient) trigger(dagID string) triggerResp {
 	c.t.Helper()
-	var r runResp
+	var r triggerResp
 	c.call("POST", "/dags/"+dagID+"/runs", nil, http.StatusCreated, &r)
 	return r
+}
+
+func (c *apiClient) triggerRun(dagID string) runResp {
+	c.t.Helper()
+	return c.trigger(dagID).Run
+}
+
+// addDependency makes taskID depend on dependsOnID (no HTTP endpoint exists).
+func (c *apiClient) addDependency(taskID, dependsOnID string) {
+	c.t.Helper()
+	if _, err := c.pool.Exec(context.Background(),
+		`INSERT INTO task_dependencies (task_id, depends_on_task_id) VALUES ($1, $2)`, taskID, dependsOnID); err != nil {
+		c.t.Fatalf("addDependency: %v", err)
+	}
+}
+
+// streamTaskInstanceIDs returns the task_instance_id of every message on the
+// API's stream, oldest first.
+func (c *apiClient) streamTaskInstanceIDs() []string {
+	c.t.Helper()
+	msgs, err := c.rc.XRange(context.Background(), c.streamName, "-", "+").Result()
+	if err != nil {
+		c.t.Fatalf("XRange: %v", err)
+	}
+	var ids []string
+	for _, m := range msgs {
+		ids = append(ids, m.Values["task_instance_id"].(string))
+	}
+	return ids
 }
 
 func randomUUID() string { return uuid.NewString() }

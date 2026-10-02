@@ -11,10 +11,9 @@ import (
 	"orion-api/internal/queue"
 )
 
-// The API doesn't enqueue on trigger yet, so these tests play the role of
-// the scheduler: trigger a run over HTTP, push its task instances onto the
-// stream, and let simulated workers consume them. Workers mirror the real
-// contract from queue.go: update Postgres first, ack only afterwards.
+// Triggering a run enqueues its ready task instances; simulated workers then
+// consume them. Workers mirror the real contract from queue.go: update
+// Postgres first, ack only afterwards.
 
 // runWorker simulates one worker: dequeue -> mark running -> mark success
 // (in Postgres) -> ack. It stops when ctx is done or the queue stays empty.
@@ -49,37 +48,23 @@ func runWorker(ctx context.Context, t *testing.T, c *apiClient, s *queue.Stream,
 
 func TestQueueEndToEnd(t *testing.T) {
 	c := newAPI(t)
-	rc := redisClient(t)
-	name := uniqueStreamName(t, rc)
+	rc, name, s := c.rc, c.streamName, c.stream
 	ctx := context.Background()
 
-	s, err := queue.NewStream(ctx, redisAddr(), name, testGroup, 1000)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// 1. Create a DAG with tasks and trigger a run via the API.
+	// 1. Create a DAG with tasks and trigger a run via the API, which
+	// enqueues the ready task instances itself.
 	d := c.createDAG("pipeline")
 	const taskCount = 8
 	for i := 0; i < taskCount; i++ {
 		c.createTask(d.ID, string(rune('a'+i)))
 	}
-	run := c.triggerRun(d.ID)
-
-	var tis []taskInstanceResp
-	c.call("GET", "/dags/"+run.ID+"/task-instances", nil, http.StatusOK, &tis)
-	if len(tis) != taskCount {
-		t.Fatalf("task instances = %d, want %d", len(tis), taskCount)
+	trig := c.trigger(d.ID)
+	tis := trig.TaskInstances
+	if len(tis) != taskCount || len(trig.Enqueued) != taskCount {
+		t.Fatalf("task instances = %d, enqueued = %d, want %d each", len(tis), len(trig.Enqueued), taskCount)
 	}
 
-	// 2. Enqueue each task instance.
-	for _, ti := range tis {
-		if _, err := s.Enqueue(ctx, ti.ID); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	// 3. Three workers drain the queue concurrently.
+	// 2. Three workers drain the queue concurrently.
 	wctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	var processed sync.Map
@@ -105,7 +90,7 @@ func TestQueueEndToEnd(t *testing.T) {
 	}()
 	wg.Wait()
 
-	// 4. Every task instance processed exactly once, visible through the API.
+	// 3. Every task instance processed exactly once, visible through the API.
 	var gotIDs, wantIDs []string
 	processed.Range(func(k, _ any) bool { gotIDs = append(gotIDs, k.(string)); return true })
 	for _, ti := range tis {
@@ -124,7 +109,7 @@ func TestQueueEndToEnd(t *testing.T) {
 		}
 	}
 
-	// 5. Nothing left pending or undelivered.
+	// 4. Nothing left pending or undelivered.
 	if got := pendingCount(t, rc, name); got != 0 {
 		t.Fatalf("pending = %d, want 0", got)
 	}
@@ -135,25 +120,12 @@ func TestQueueEndToEnd(t *testing.T) {
 
 func TestQueueEndToEndCrashedWorkerIsRecovered(t *testing.T) {
 	c := newAPI(t)
-	rc := redisClient(t)
-	name := uniqueStreamName(t, rc)
+	rc, name, s := c.rc, c.streamName, c.stream
 	ctx := context.Background()
-
-	s, err := queue.NewStream(ctx, redisAddr(), name, testGroup, 1000)
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	d := c.createDAG("flaky")
 	c.createTask(d.ID, "only")
-	run := c.triggerRun(d.ID)
-	var tis []taskInstanceResp
-	c.call("GET", "/dags/"+run.ID+"/task-instances", nil, http.StatusOK, &tis)
-	tiID := tis[0].ID
-
-	if _, err := s.Enqueue(ctx, tiID); err != nil {
-		t.Fatal(err)
-	}
+	tiID := c.trigger(d.ID).TaskInstances[0].ID
 
 	// worker-crash picks it up, marks it running, then dies before acking.
 	_, got := dequeueIDs(t, s, "worker-crash", 1, time.Second)

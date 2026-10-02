@@ -12,8 +12,6 @@ import (
 	"orion-api/internal/queue"
 )
 
-const testGroup = "orion:test-workers"
-
 // newTestStream builds a Stream on a private stream name.
 func newTestStream(t *testing.T, maxLen int64) (*queue.Stream, *redis.Client, string) {
 	t.Helper()
