@@ -1,3 +1,4 @@
+import json
 import os, time, socket, signal, traceback
 from pathlib import Path
 from dotenv import load_dotenv
@@ -56,8 +57,11 @@ def process(message_id, fields):
                 run_id = db.mark_failed(cursor, instance_id)
                 ready_tasks = []
             
-            db.write_log(cursor, instance_id, str({"stdout": result.stdout, "stderr": result.stderr, "timed_out": result.timed_out}))
-
+            db.write_log(cursor, instance_id, json.dumps({
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "timed_out": result.timed_out,
+            }))
             db.finalize_run(cursor, run_id)
     finally:
         pool.putconn(conn)
