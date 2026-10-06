@@ -29,7 +29,7 @@ import (
 // @host         localhost:8080
 // @BasePath     /
 func main() {
-	godotenv.Load(".env") // load .env file if present
+	godotenv.Load("../.env") // load .env file if present
 
 	connString := os.Getenv("DATABASE_URL")
 	if connString == "" {
