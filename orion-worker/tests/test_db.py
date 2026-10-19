@@ -198,3 +198,73 @@ def test_lookups_return_none_for_unknown_instance(cur):
     assert db.get_task(cur, unknown) is None
     assert db.get_python_version(cur, unknown) is None
 
+
+# ---- task outputs and inputs ----
+
+@pytest.mark.parametrize("value", [{"rows": 3, "tags": ["a"]}, [1, 2, 3], 42, "text", False])
+def test_mark_success_stores_the_output_with_the_status(cur, value):
+    _, inst = seed(cur, ["a"], status="running")
+    db.mark_success(cur, inst["a"], "\nlog", value)
+    cur.execute("SELECT status, output FROM task_instances WHERE id = %s", (inst["a"],))
+    assert cur.fetchone() == ("success", value)
+
+
+def test_mark_success_without_output_leaves_it_null(cur):
+    _, inst = seed(cur, ["a"], status="running")
+    db.mark_success(cur, inst["a"], "\nlog")
+    cur.execute("SELECT output FROM task_instances WHERE id = %s", (inst["a"],))
+    assert cur.fetchone()[0] is None
+
+
+def test_mark_failed_never_stores_an_output(cur):
+    _, inst = seed(cur, ["a"], status="running")
+    db.mark_failed(cur, inst["a"], "\nlog")
+    cur.execute("SELECT output FROM task_instances WHERE id = %s", (inst["a"],))
+    assert cur.fetchone()[0] is None
+
+
+def set_output(cur, instance_id, value):
+    cur.execute("UPDATE task_instances SET output = %s::jsonb WHERE id = %s", (value, instance_id))
+    cur.connection.commit()
+
+
+def test_get_inputs_returns_each_parents_output_by_task_name(cur):
+    _, inst = seed(cur, DIAMOND["tasks"], deps=DIAMOND["deps"], status="success")
+    set_output(cur, inst["b"], '{"from": "b", "n": 2}')
+    set_output(cur, inst["c"], "[1, 2, 3]")
+    assert db.get_inputs(cur, inst["d"]) == {"b": {"from": "b", "n": 2}, "c": [1, 2, 3]}
+
+
+def test_a_parent_that_published_nothing_maps_to_none(cur):
+    _, inst = seed(cur, DIAMOND["tasks"], deps=DIAMOND["deps"], status="success")
+    set_output(cur, inst["b"], '{"n": 1}')
+    assert db.get_inputs(cur, inst["d"]) == {"b": {"n": 1}, "c": None}
+
+
+def test_a_task_without_parents_gets_no_inputs(cur):
+    _, inst = seed(cur, DIAMOND["tasks"], deps=DIAMOND["deps"])
+    assert db.get_inputs(cur, inst["a"]) == {}
+
+
+def test_only_direct_parents_are_inputs(cur):
+    _, inst = seed(cur, DIAMOND["tasks"], deps=DIAMOND["deps"], status="success")
+    set_output(cur, inst["a"], '{"grandparent": true}')
+    assert "a" not in db.get_inputs(cur, inst["d"])
+
+
+def test_inputs_come_from_the_same_run_only(cur):
+    run1, inst1 = seed(cur, ["a", "b"], deps=[("b", "a")], status="success")
+    cur.execute("SELECT dag_id FROM runs WHERE id = %s", (run1,))
+    cur.execute("INSERT INTO runs (dag_id, number) VALUES (%s, 2) RETURNING id", (cur.fetchone()[0],))
+    run2 = cur.fetchone()[0]
+    cur.execute("INSERT INTO task_instances (run_id, task_id, status) "
+                "SELECT %s, task_id, 'success' FROM task_instances WHERE run_id = %s", (run2, run1))
+    cur.connection.commit()
+    cur.execute("SELECT ti.id FROM task_instances ti JOIN tasks t ON t.id = ti.task_id WHERE ti.run_id = %s AND t.name = 'a'", (run2,))
+    a2 = cur.fetchone()[0]
+    cur.execute("SELECT ti.id FROM task_instances ti JOIN tasks t ON t.id = ti.task_id WHERE ti.run_id = %s AND t.name = 'b'", (run2,))
+    b2 = cur.fetchone()[0]
+    set_output(cur, inst1["a"], '{"run": 1}')
+    set_output(cur, a2, '{"run": 2}')
+    assert db.get_inputs(cur, inst1["b"]) == {"a": {"run": 1}}
+    assert db.get_inputs(cur, b2) == {"a": {"run": 2}}

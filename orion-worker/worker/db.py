@@ -1,4 +1,5 @@
 from psycopg2 import pool as pg_pool
+from psycopg2.extras import Json
 import psycopg2
 
 def get_pool(db_url: str, minconn: int = 1, maxconn: int = 5):
@@ -78,17 +79,18 @@ def mark_failed(cursor, instance_id: str, log: str) -> str:
         conn.rollback()
         raise
 
-def mark_success(cursor, instance_id: str, log: str) -> str:
+def mark_success(cursor, instance_id: str, log: str, output=None) -> str:
     try:
         cursor.execute(
             """
             UPDATE task_instances
             SET status = 'success', finished_at = NOW(),
-                logs = CONCAT(COALESCE(logs, ''), %s)
+                logs = CONCAT(COALESCE(logs, ''), %s),
+                output = %s
             WHERE id = %s AND status = 'running'
             RETURNING run_id
             """,
-            (log, instance_id),
+            (log, None if output is None else Json(output), instance_id),
         )
         row = cursor.fetchone()
         if row is None:
@@ -198,6 +200,26 @@ def get_task(cursor, instance_id: str):
         cursor.connection.rollback()
         raise
     
+def get_inputs(cursor, instance_id: str) -> dict:
+    # Outputs of this task's parents in the same run, keyed by parent task name. A parent that
+    # published nothing maps to None. A task with no parents gets {}.
+    try:
+        cursor.execute(
+            """
+            SELECT pt.name, pti.output
+            FROM task_instances ti
+            JOIN task_dependencies td ON td.task_id = ti.task_id
+            JOIN tasks pt ON pt.id = td.depends_on_task_id
+            JOIN task_instances pti ON pti.task_id = td.depends_on_task_id AND pti.run_id = ti.run_id
+            WHERE ti.id = %s
+            """,
+            (instance_id,),
+        )
+        return {name: output for name, output in cursor.fetchall()}
+    except Exception:
+        cursor.connection.rollback()
+        raise
+
 def get_run_and_dag(cursor, instance_id: str):
     # (run_id, dag_id) of an instance, for the events browsers listen to
     try:

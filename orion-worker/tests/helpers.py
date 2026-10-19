@@ -1,14 +1,15 @@
 import json
 
 
-def seed(cur, tasks, deps=(), status="pending", python_version=None, config="{}"):
-    """One DAG, one run, one instance per task. deps is [(child, parent)] by task name."""
+def seed(cur, tasks, deps=(), status="pending", python_version=None, config="{}", configs=None):
+    """One DAG, one run, one instance per task. deps is [(child, parent)] by task name.
+    configs maps a task name to its own config JSON string; other tasks use `config`."""
     cur.execute("INSERT INTO dags (name, python_version) VALUES ('d', %s) RETURNING id", (python_version,))
     dag_id = cur.fetchone()[0]
     task_ids = {}
     for name in tasks:
         cur.execute("INSERT INTO tasks (dag_id, name, task_type, config) VALUES (%s, %s, 'python', %s) RETURNING id",
-                    (dag_id, name, config))
+                    (dag_id, name, (configs or {}).get(name, config)))
         task_ids[name] = cur.fetchone()[0]
     for child, parent in deps:
         cur.execute("INSERT INTO task_dependencies VALUES (%s, %s)", (task_ids[child], task_ids[parent]))
