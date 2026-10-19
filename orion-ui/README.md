@@ -5,10 +5,9 @@ platform (a lightweight Airflow alternative). This package is the web console:
 a dark, mission-control–style interface for observing DAGs, runs, tasks, and
 workers.
 
-> **Status:** static UI skeleton complete. Every screen is reachable and looks
-> finished, but everything renders from hardcoded example data — there is no
-> live data, no fetching, and no real-time behavior wired in yet. See
-> [What still needs to be done](#what-still-needs-to-be-done).
+> **Status:** wired to the Orion API. Every screen reads real data, and runs,
+> task graphs and workers update live over a WebSocket (no refresh). The
+> remaining gaps are listed in [What still needs to be done](#what-still-needs-to-be-done).
 
 ## Tech stack
 
@@ -16,8 +15,8 @@ workers.
 - **TypeScript** (strict, no `any`)
 - **Tailwind CSS v4** + **shadcn/ui** primitives (on top of the unified
   `radix-ui` package)
-- **Redux Toolkit** + `react-redux` — store is scaffolded but currently unused
-  by the presentational layer (see below)
+- **Redux Toolkit** + `react-redux`; **RTK Query** (inside Redux Toolkit) is the
+  data layer: it fetches, caches and refetches everything from the API
 - **@xyflow/react** (React Flow v12) for the task-graph visualizations
 - **next-themes** for the dark/light theme
 - **lucide-react** for icons
@@ -35,6 +34,10 @@ npm install
 npm run dev
 ```
 
+The UI needs the Orion API (default `http://localhost:8080`, override with
+`NEXT_PUBLIC_API_URL`; see `.env.example`). `NEXT_PUBLIC_` variables are inlined at
+build time, so restart `next dev` after changing one.
+
 Open [http://localhost:3000](http://localhost:3000). The root route redirects to
 `/dashboard`.
 
@@ -44,6 +47,7 @@ Other scripts:
 npm run build   # production build
 npm run start   # serve the production build
 npm run lint    # eslint
+npm test        # vitest: adapters, graph layout, log parsing, event mapping
 ```
 
 ## Project structure
@@ -77,18 +81,25 @@ components/
   ui/                      # shadcn primitives (button, card, sheet, tabs, …)
 
 lib/
-  types.ts                 # central domain types (Dag, Task, Run, Worker, LogLine…)
+  types.ts                 # UI domain types (Dag, Run, Task, Worker, LogLine, status unions)
   status-style.ts          # status → color/label style maps
-  sample-data.ts           # ALL static example data lives here
-  utils.ts                 # cn() helper
+  use-now.ts               # ticking clock hook (relative times, running durations)
+  api/types.ts             # API response shapes (snake_case)
+  api/adapters.ts          # API → UI types, graph layout, log parsing, formatting (pure, tested)
+  api/events.ts            # WebSocket event parsing → cache tags, reconnect backoff (pure, tested)
+  api/config.ts            # API_URL / WS_URL from NEXT_PUBLIC_API_URL
 
-store/                     # Redux Toolkit store + slices (scaffolded, unused)
+store/
+  api.ts                   # RTK Query: every endpoint, with the cache tags it provides
+  store.ts                 # Redux store (api, connection state)
+  slices/connectionSlice.ts  # is the WebSocket up? (header LIVE / OFFLINE)
+  slices/dagSlice.ts       # unused scaffold, left as is
 hooks/                     # use-mobile (sidebar)
 ```
 
-**Convention:** organized by feature, not by file type. Everything in this pass
-is presentational — components take props for their real data needs, but only
-static example values (from `lib/sample-data.ts`) are passed in.
+**Convention:** organized by feature, not by file type. Pages fetch with the RTK
+Query hooks in `store/api.ts`, convert with `lib/api/adapters.ts`, and pass the
+result to presentational components as props; components never see raw API shapes.
 
 ## Screens (current state)
 
@@ -98,7 +109,7 @@ static example values (from `lib/sample-data.ts`) are passed in.
 | `/dags` | **DAGs list** | Search/filter bar (visual only), status stat cards, table of DAGs; rows link to DAG detail |
 | `/dags/[dagId]` | **DAG detail** | React Flow task graph (colored by last-run status) + run-history table; 404s on unknown id |
 | `/runs` | **Runs list** | Status stat cards, search bar (visual only), table of runs; rows link to run detail |
-| `/runs/[runId]` | **Run detail** | Tabs: task **Graph** (nodes colored by live task status) and **Timeline** (gantt of task durations); **Logs** panel + per-task log slide-over (Sheet); 404s on unknown id |
+| `/runs/[runId]` | **Run detail** | Tabs: task **Graph** (nodes colored by live task status) and **Timeline** (gantt of task durations); **Outputs** panel (the JSON each task published) + **Logs** panel + per-task log slide-over (Sheet); 404s on unknown id |
 | `/workers` | **Worker pool** | Pool stat cards + grid of worker cards (load bar, slots, region, current task) |
 | `/settings` | **Settings / connections** | General config fields + connections list |
 
@@ -125,62 +136,61 @@ static example values (from `lib/sample-data.ts`) are passed in.
   `failed` / `retrying`). All color/label styling is centralized in
   `lib/status-style.ts`.
 
-## Data model
+## Data flow and live updates
 
-All example data is static and typed. Domain types live in `lib/types.ts`
-(`Dag`, `Task`, `TaskGraphNode`, `TaskEdge`, `Run`, `Worker`, `LogLine`, plus
-the status unions). All example values live in `lib/sample-data.ts`. The
-task-graph topology (`TASK_TOPOLOGY` / `TASK_EDGES`) is defined once and reused
-by both the DAG-definition graph and the run graph, each with its own status
-map.
+```
+page ──useGetXQuery──► RTK Query cache ──fetch──► Go API
+                              ▲
+            invalidateTags    │   {"type":"run","run_id":...}  (a hint, no data)
+live-updates.tsx ◄──WebSocket──┘
+```
+
+1. A page calls a hook such as `useGetRunInstancesQuery(runId)`. RTK Query fetches it
+   and caches it under tags (`Instances:<runId>`).
+2. `components/live-updates.tsx` (mounted once in `providers.tsx`) holds a WebSocket to
+   the API. Each message is only a hint about what changed; `lib/api/events.ts` maps it
+   to cache tags, and `invalidateTags` makes RTK Query refetch whatever is on screen.
+3. Events that arrive together are batched (150 ms) into one refetch. On reconnect
+   after a drop everything is invalidated, because events may have been missed.
+4. The header shows **LIVE / CONNECTING / OFFLINE** (`components/live-indicator.tsx`).
+5. A worker that is killed sends no event, so the workers query also polls every 10 s.
+
+Why refetch instead of patching the cache from the event: one read path, nothing to
+drift out of sync with the database, and a lost event is harmless. If refetching ever
+feels slow, patching from event payloads is the next optimization.
+
+### How API data maps to what the components show
+
+| UI shows | Comes from |
+| --- | --- |
+| DAG status badge | the DAG's last run (`running` while queued/running; `NEVER RUN` if none) |
+| Run `#12`, progress `3/4 tasks` | `runs.number`, `tasks_done`/`tasks_total` (done = success, failed or skipped) |
+| Task graph positions | computed client-side (`layoutGraph`: column = longest dependency path) |
+| Graph node colors | that run's task instances (DAG page: the latest run) |
+| Log lines | each instance's `logs`: stdout → INFO, stderr → ERROR on a failed task (WARN otherwise), timeout → ERROR. Timestamps are the instance's finish time (the backend has no per-line times) |
+| Worker card | `/workers` heartbeats; one slot per worker, so busy = 100% load |
+
+Statuses: tasks and runs share one vocabulary (`pending`, `queued`, `running`,
+`success`, `failed`, `retrying`, `skipped`, `cancelled`); a DAG adds `idle` (never run).
 
 ## What still needs to be done
 
-This pass is **UI only**. None of the following is implemented yet:
-
-### Data & state
-- [ ] **API client / data fetching** — replace `lib/sample-data.ts` with real
-      calls to the Go API server. Components already accept props, so this is
-      wiring, not restructuring.
-- [ ] **Redux integration** — the store (`store/`) and `dagSlice` are scaffolded
-      but unused. Decide what actually belongs in global state vs. server state,
-      and wire selectors/dispatch into the pages.
-- [ ] **Live updates** — subscribe to run/task status changes (Redis Pub/Sub via
-      WebSocket/SSE) so the graph nodes, timeline, run progress, and logs update
-      in real time instead of showing a static snapshot.
-- [ ] **Log streaming** — the log viewer currently renders a fixed array; make
-      it tail live and virtualize (`react-window` is already a dependency).
-
-### Functionality (currently visual-only)
-- [ ] **Search & filtering** on the DAGs and Runs lists (bars are placeholders).
-- [ ] **Filtering / time-range** controls on the dashboard and runs pages.
-- [ ] **Actions** — "New Run" / "Register DAG" / "Trigger run" / "Re-run"
-      buttons are inert; wire to the API.
-- [ ] **Settings & connections** — fields are static; add save/validation and a
-      real connections CRUD flow.
-- [ ] **Active-route state** works in the sidebar, but there is no breadcrumb or
-      deep-link state (e.g. selected node in the graph).
-
-### Screens / gaps
-- [ ] Decide the fate of the leftover **`/connections`** and **`/variables`**
-      stub pages — either build them out and add to nav, fold `connections`
-      fully into Settings, or delete them. They currently exist but are not
-      linked.
-- [ ] **DAG detail** graph shows last-run status; consider a run selector so the
-      graph/history reflect a chosen run.
-- [ ] **Empty / loading / error states** — add `loading.tsx` and `error.tsx`
-      per route, plus empty-state UI for lists.
-- [ ] **Auth / login flow** — none yet (was out of scope).
+### Functionality
+- [ ] **Search & filtering** on the DAGs and Runs lists, and the time-range
+      control on Runs (the bars are still visual-only).
+- [ ] **DAG / task editor** ("Register DAG" was removed until the YAML spec and a
+      task editor exist). DAGs are created through the API for now.
+- [ ] **Settings & connections** — still static; no backend for it.
+- [ ] **Line-by-line log streaming** — logs appear when a task finishes, because the
+      executor captures output at the end (status changes are live).
+- [ ] Decide the fate of the leftover **`/connections`** and **`/variables`** stubs.
+- [ ] **DAG detail run selector** — the graph always shows the latest run.
+- [ ] **Auth / login flow** — none yet.
 
 ### Polish
+- [ ] `loading.tsx` / `error.tsx` per route (pages have their own loading, error and
+      empty states already).
 - [ ] Responsive review below the desktop breakpoint (desktop-first for now).
-- [ ] Accessibility pass (focus order, ARIA on custom widgets, keyboard nav in
-      the graph).
-- [ ] Consider pushing the accent color bolder (more saturated electric
-      blue/violet) if a stronger "mission-control" look is wanted.
-
-## Out of scope for this pass
-
-No Redux logic, no custom data hooks, no WebSocket/real-time simulation, no real
-API calls, no auth, no CI/deploy config — all intentionally deferred to the
-integration work above.
+- [ ] Accessibility pass (focus order, ARIA on custom widgets, keyboard nav in the graph).
+- [ ] Pre-existing lint findings: one `react-hooks/set-state-in-effect` error in
+      `hooks/use-mobile.ts` and unused imports in `components/app-sidebar.tsx`.

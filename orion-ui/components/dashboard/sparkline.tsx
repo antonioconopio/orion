@@ -17,6 +17,15 @@ export function Sparkline({
   status: DagStatus;
   className?: string;
 }) {
+  // fewer than two finished runs: nothing to draw yet
+  if (data.length < 2) {
+    return (
+      <span className={cn("w-24 shrink-0 font-mono text-xs text-muted-foreground/40", className)}>
+        —
+      </span>
+    );
+  }
+
   const max = Math.max(...data);
   const min = Math.min(...data);
   const range = max - min || 1;

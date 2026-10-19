@@ -1,21 +1,26 @@
-import { Plus } from "lucide-react";
+"use client";
+
+import { useMemo } from "react";
 
 import { PageHeader } from "@/components/page-header";
-import { Button } from "@/components/ui/button";
+import { EmptyState, ErrorState, RowsSkeleton } from "@/components/data-states";
 import { DagStatCard } from "@/components/dashboard/dag-stat-card";
 import { DagTable } from "@/components/dashboard/dag-table";
 import { DagFilterBar } from "@/components/dags/dag-filter-bar";
-import { DAGS, DAG_STATS } from "@/lib/sample-data";
+import { toDag } from "@/lib/api/adapters";
+import { useNow } from "@/lib/use-now";
+import { useGetDagsQuery } from "@/store/api";
 
 export default function DagsPage() {
+  const { data, isLoading, isError, refetch } = useGetDagsQuery();
+  const now = useNow(15_000);
+  const dags = useMemo(() => (data ?? []).map((d) => toDag(d, now)), [data, now]);
+
+  const count = (status: string) => dags.filter((d) => d.status === status).length;
+
   return (
     <div className="flex h-screen w-full flex-col">
-      <PageHeader label="DAGS">
-        <Button variant="default" size="sm" className="rounded-md">
-          <Plus />
-          Register DAG
-        </Button>
-      </PageHeader>
+      <PageHeader label="DAGS" />
 
       <div className="flex-1 overflow-y-auto p-6">
         <div className="mx-auto flex max-w-7xl flex-col gap-4">
@@ -23,30 +28,30 @@ export default function DagsPage() {
             <div>
               <h1 className="text-lg font-semibold">DAGs</h1>
               <p className="text-sm text-muted-foreground">
-                All workflows in this workspace, sorted by last activity.
+                All workflows in this workspace.
               </p>
             </div>
             <div className="flex gap-2">
               <DagStatCard
                 label="TOTAL"
-                value={DAG_STATS.total}
+                value={dags.length}
                 dotClassName="bg-violet-400"
               />
               <DagStatCard
                 label="RUNNING"
-                value={DAG_STATS.running}
+                value={count("running")}
                 dotClassName="bg-amber-500"
                 valueClassName="text-amber-500"
               />
               <DagStatCard
                 label="FAILED"
-                value={DAG_STATS.failed}
+                value={count("failed")}
                 dotClassName="bg-red-500"
                 valueClassName="text-red-500"
               />
               <DagStatCard
                 label="SUCCESS"
-                value={DAG_STATS.success}
+                value={count("success")}
                 dotClassName="bg-emerald-500"
                 valueClassName="text-emerald-500"
               />
@@ -55,7 +60,18 @@ export default function DagsPage() {
 
           <DagFilterBar />
 
-          <DagTable dags={DAGS} />
+          {isLoading ? (
+            <RowsSkeleton />
+          ) : isError ? (
+            <ErrorState onRetry={refetch} />
+          ) : dags.length === 0 ? (
+            <EmptyState
+              title="No DAGs yet"
+              hint="Create one with POST /dags (a DAG editor arrives with the YAML spec)."
+            />
+          ) : (
+            <DagTable dags={dags} />
+          )}
         </div>
       </div>
     </div>

@@ -1,17 +1,27 @@
+"use client";
+
+import { useMemo } from "react";
 import { Search } from "lucide-react";
 
 import { PageHeader } from "@/components/page-header";
+import { EmptyState, ErrorState, RowsSkeleton } from "@/components/data-states";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { DagStatCard } from "@/components/dashboard/dag-stat-card";
 import { RunTable } from "@/components/runs/run-table";
-import { RUNS } from "@/lib/sample-data";
-
-const running = RUNS.filter((r) => r.status === "running").length;
-const failed = RUNS.filter((r) => r.status === "failed").length;
-const succeeded = RUNS.filter((r) => r.status === "success").length;
+import { toRun } from "@/lib/api/adapters";
+import { useNow } from "@/lib/use-now";
+import { useGetRunsQuery } from "@/store/api";
 
 export default function RunsPage() {
+  const { data, isLoading, isError, refetch } = useGetRunsQuery({ limit: 100 });
+  const now = useNow(1000); // running runs show a live duration
+  const runs = useMemo(() => (data ?? []).map((r) => toRun(r, now)), [data, now]);
+
+  const running = runs.filter((r) => r.status === "running" || r.status === "queued").length;
+  const failed = runs.filter((r) => r.status === "failed").length;
+  const succeeded = runs.filter((r) => r.status === "success").length;
+
   return (
     <div className="flex h-screen w-full flex-col">
       <PageHeader label="RUNS" />
@@ -60,7 +70,15 @@ export default function RunsPage() {
             </Button>
           </div>
 
-          <RunTable runs={RUNS} />
+          {isLoading ? (
+            <RowsSkeleton />
+          ) : isError ? (
+            <ErrorState onRetry={refetch} />
+          ) : runs.length === 0 ? (
+            <EmptyState title="No runs yet" hint="Trigger a DAG to see its run here." />
+          ) : (
+            <RunTable runs={runs} />
+          )}
         </div>
       </div>
     </div>

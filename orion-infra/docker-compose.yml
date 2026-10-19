@@ -31,6 +31,57 @@ services:
       timeout: 5s
       retries: 5
 
+  # Applies the SQL migrations once and exits; the API and the worker wait for it.
+  migrate:
+    image: migrate/migrate:v4.18.1
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ../migrations:/migrations:ro
+    command:
+      - "-path=/migrations"
+      - "-database=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable"
+      - "up"
+    restart: "no"
+
+  api:
+    build: ../orion-api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
+      PORT: "8080"
+      REDIS_ADDR: redis:6379
+      STREAM_NAME: ${STREAM_NAME}
+      CONSUMER_GROUP: ${CONSUMER_GROUP}
+      UI_ORIGIN: http://localhost:3000   # the one browser origin allowed by CORS and the WebSocket
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  ui:
+    build:
+      context: ../orion-ui
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:8080   # where the browser reaches the API
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+
   worker:
     build: ../orion-worker
     restart: unless-stopped
@@ -39,6 +90,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
       REDIS_ADDR: redis:6379

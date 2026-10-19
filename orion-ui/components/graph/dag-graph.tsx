@@ -62,12 +62,20 @@ export function DagGraph({
     });
   }, [nodes, edges]);
 
+  // Remount only when the shape of the graph changes (a different DAG, tasks loaded), so fitView
+  // runs for it; a status change just updates the controlled nodes and keeps the user's zoom and pan.
+  const shapeKey = useMemo(
+    () => nodes.map((n) => n.id).join(",") + "|" + edges.map((e) => `${e.source}>${e.target}`).join(","),
+    [nodes, edges],
+  );
+
   return (
     <div className={cn("h-full w-full", className)}>
       <ReactFlow
+        key={shapeKey}
         colorMode="dark"
-        defaultNodes={rfNodes}
-        defaultEdges={rfEdges}
+        nodes={rfNodes}
+        edges={rfEdges}
         nodeTypes={nodeTypes}
         fitView
         fitViewOptions={{ padding: 0.24 }}

@@ -5,8 +5,10 @@ import type { TaskStatus } from "@/lib/types";
 const ORDER: TaskStatus[] = [
   "success",
   "running",
+  "queued",
   "retrying",
   "failed",
+  "skipped",
   "pending",
 ];
 

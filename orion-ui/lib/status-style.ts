@@ -24,6 +24,14 @@ export const TASK_STATUS_STYLE: Record<
     node: "border-zinc-600/60 bg-zinc-800/40 text-zinc-300",
     accent: "text-zinc-400",
   },
+  queued: {
+    label: "QUEUED",
+    dot: "bg-sky-500",
+    fill: "fill-sky-500",
+    badge: "bg-sky-500/10 text-sky-300 ring-sky-500/20",
+    node: "border-sky-500/60 bg-sky-500/10 text-sky-200",
+    accent: "text-sky-400",
+  },
   running: {
     label: "RUNNING",
     dot: "bg-amber-500",
@@ -55,6 +63,22 @@ export const TASK_STATUS_STYLE: Record<
     badge: "bg-violet-500/10 text-violet-300 ring-violet-500/20",
     node: "border-violet-500/70 bg-violet-500/10 text-violet-200",
     accent: "text-violet-400",
+  },
+  skipped: {
+    label: "SKIPPED",
+    dot: "bg-zinc-600",
+    fill: "fill-zinc-600",
+    badge: "bg-zinc-500/10 text-zinc-400 ring-zinc-500/20",
+    node: "border-dashed border-zinc-600/50 bg-transparent text-zinc-500",
+    accent: "text-zinc-500",
+  },
+  cancelled: {
+    label: "CANCELLED",
+    dot: "bg-zinc-600",
+    fill: "fill-zinc-600",
+    badge: "bg-zinc-500/10 text-zinc-400 ring-zinc-500/20",
+    node: "border-zinc-600/50 bg-zinc-800/30 text-zinc-500",
+    accent: "text-zinc-500",
   },
 };
 

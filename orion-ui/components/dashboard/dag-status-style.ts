@@ -22,4 +22,10 @@ export const DAG_STATUS_STYLE: Record<
     fill: "fill-amber-500",
     badge: "bg-amber-500/10 text-amber-400 ring-amber-500/20",
   },
+  idle: {
+    label: "NEVER RUN",
+    dot: "bg-zinc-500",
+    fill: "fill-zinc-500",
+    badge: "bg-zinc-500/10 text-zinc-400 ring-zinc-500/20",
+  },
 };
