@@ -17,6 +17,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -33,7 +34,7 @@ import (
 	"orion-api/internal/queue"
 )
 
-const migrationPath = "../../migrations/000001_init_schema.up.sql"
+const migrationGlob = "../../migrations/*.up.sql"
 
 var (
 	poolOnce sync.Once
@@ -119,19 +120,30 @@ func initPool() (*pgxpool.Pool, error) {
 }
 
 func ensureSchema(ctx context.Context, pool *pgxpool.Pool) (*pgxpool.Pool, error) {
-	var exists bool
-	if err := pool.QueryRow(ctx, `SELECT to_regclass('public.dags') IS NOT NULL`).Scan(&exists); err != nil {
+	// the newest column stands in for "schema is current"; otherwise rebuild the throwaway DB
+	var current bool
+	if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM information_schema.columns
+		WHERE table_name = 'task_instances' AND column_name = 'queued_at')`).Scan(&current); err != nil {
 		return nil, err
 	}
-	if exists {
+	if current {
 		return pool, nil
 	}
-	sql, err := os.ReadFile(migrationPath)
+	if _, err := pool.Exec(ctx, `DROP SCHEMA public CASCADE; CREATE SCHEMA public`); err != nil {
+		return nil, err
+	}
+	files, err := filepath.Glob(migrationGlob) // zero-padded names sort in order
 	if err != nil {
 		return nil, err
 	}
-	if _, err := pool.Exec(ctx, string(sql)); err != nil {
-		return nil, err
+	for _, f := range files {
+		sql, err := os.ReadFile(f)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := pool.Exec(ctx, string(sql)); err != nil {
+			return nil, fmt.Errorf("%s: %w", f, err)
+		}
 	}
 	return pool, nil
 }

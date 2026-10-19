@@ -16,28 +16,39 @@ def mark_running(cursor, instance_id: str, worker_id: str, reclaimed: bool = Fal
             SET status = 'running', started_at = NOW(), worker_id = %(worker)s
             WHERE id = %(id)s
               AND (status = 'queued' OR (%(reclaimed)s AND status = 'running'))
-            RETURNING id
+            RETURNING run_id
             """,
             {"id": instance_id, "worker": worker_id, "reclaimed": reclaimed},
         )
-        won = cursor.fetchone() is not None
+        row = cursor.fetchone()
+        won = row is not None
+        if won:
+            # same transaction, so a run is never 'queued' while one of its tasks is running
+            cursor.execute(
+                """
+                UPDATE runs SET status = 'running', started_at = NOW()
+                WHERE id = %s AND status = 'queued'
+                """,
+                (row[0],),
+            )
         cursor.connection.commit()
         return won
     except Exception:
         cursor.connection.rollback()
         raise
 
-def mark_failed(cursor, instance_id: str) -> str:
+def mark_failed(cursor, instance_id: str, log: str) -> str:
     conn = cursor.connection
     try:
         cursor.execute(
             """
             UPDATE task_instances
-            SET status = 'failed', finished_at = NOW()
+            SET status = 'failed', finished_at = NOW(),
+                logs = CONCAT(COALESCE(logs, ''), %s)
             WHERE id = %s AND status = 'running'
             RETURNING run_id, task_id
             """,
-            (instance_id,),
+            (log, instance_id),
         )
         row = cursor.fetchone()
         if row is None:
@@ -67,16 +78,17 @@ def mark_failed(cursor, instance_id: str) -> str:
         conn.rollback()
         raise
 
-def mark_success(cursor, instance_id: str) -> str:
+def mark_success(cursor, instance_id: str, log: str) -> str:
     try:
         cursor.execute(
             """
             UPDATE task_instances
-            SET status = 'success', finished_at = NOW()
+            SET status = 'success', finished_at = NOW(),
+                logs = CONCAT(COALESCE(logs, ''), %s)
             WHERE id = %s AND status = 'running'
             RETURNING run_id
             """,
-            (instance_id,),
+            (log, instance_id),
         )
         row = cursor.fetchone()
         if row is None:
@@ -120,7 +132,7 @@ def claim_ready_tasks(cursor: psycopg2.extensions.cursor, instance_id: str) -> l
         cursor.execute(
             """
             UPDATE task_instances ti
-            SET status = 'queued'
+            SET status = 'queued', queued_at = NOW()
             WHERE ti.status = 'pending'
               AND ti.run_id = (SELECT run_id FROM task_instances WHERE id = %s)
               AND ti.task_id IN (
@@ -149,18 +161,22 @@ def claim_ready_tasks(cursor: psycopg2.extensions.cursor, instance_id: str) -> l
         cursor.connection.rollback()
         raise
 
-def write_log(cursor: psycopg2.extensions.cursor, instance_id: str, message: str):
+def requeue_stale(cursor: psycopg2.extensions.cursor, older_than_s: int) -> list[str]:
+    # bumping queued_at inside the UPDATE means only one worker wins each stale row
     try:
         cursor.execute(
             """
             UPDATE task_instances
-            SET logs = CONCAT(COALESCE(logs, ''), %s)
-            WHERE id = %s
-
+            SET queued_at = NOW()
+            WHERE status = 'queued'
+              AND queued_at < NOW() - make_interval(secs => %s)
+            RETURNING id
             """,
-            ("\n" + message, instance_id),
+            (older_than_s,),
         )
+        ids = [row[0] for row in cursor.fetchall()]
         cursor.connection.commit()
+        return ids
     except Exception:
         cursor.connection.rollback()
         raise

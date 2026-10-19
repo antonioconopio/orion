@@ -3,6 +3,7 @@ package handlers
 import (
 	"encoding/json"
 	"net/http"
+	"regexp"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -30,6 +31,11 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 	json.NewEncoder(w).Encode(payload)
 }
 
+// pythonVersionRe matches what the worker accepts (executor.run_python) so a bad value is rejected here, not at run time.
+var pythonVersionRe = regexp.MustCompile(`^3\.\d{1,2}$`)
+
+func validPythonVersion(v *string) bool { return v == nil || pythonVersionRe.MatchString(*v) }
+
 func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
 }
@@ -45,7 +51,7 @@ func writeError(w http.ResponseWriter, status int, message string) {
 // @Router       /dags [get]
 func (h *DAGHandler) List(w http.ResponseWriter, r *http.Request) {
 	rows, err := h.DB.Query(r.Context(), `
-		SELECT id, name, description, schedule, owner, is_active, created_at, updated_at
+		SELECT id, name, description, schedule, owner, is_active, python_version, created_at, updated_at
 		FROM dags
 		ORDER BY created_at DESC
 	`)
@@ -58,7 +64,7 @@ func (h *DAGHandler) List(w http.ResponseWriter, r *http.Request) {
 	dags := []models.DAG{}
 	for rows.Next() {
 		var d models.DAG
-		if err := rows.Scan(&d.ID, &d.Name, &d.Description, &d.Schedule, &d.Owner, &d.IsActive, &d.CreatedAt, &d.UpdatedAt); err != nil {
+		if err := rows.Scan(&d.ID, &d.Name, &d.Description, &d.Schedule, &d.Owner, &d.IsActive, &d.PythonVersion, &d.CreatedAt, &d.UpdatedAt); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to read dag row")
 			return
 		}
@@ -90,10 +96,10 @@ func (h *DAGHandler) Get(w http.ResponseWriter, r *http.Request) {
 
 	var d models.DAG
 	err = h.DB.QueryRow(r.Context(), `
-		SELECT id, name, description, schedule, owner, is_active, created_at, updated_at
+		SELECT id, name, description, schedule, owner, is_active, python_version, created_at, updated_at
 		FROM dags
 		WHERE id = $1
-	`, id).Scan(&d.ID, &d.Name, &d.Description, &d.Schedule, &d.Owner, &d.IsActive, &d.CreatedAt, &d.UpdatedAt)
+	`, id).Scan(&d.ID, &d.Name, &d.Description, &d.Schedule, &d.Owner, &d.IsActive, &d.PythonVersion, &d.CreatedAt, &d.UpdatedAt)
 
 	if err == pgx.ErrNoRows {
 		writeError(w, http.StatusNotFound, "dag not found")
@@ -130,13 +136,18 @@ func (h *DAGHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !validPythonVersion(req.PythonVersion) {
+		writeError(w, http.StatusBadRequest, `python_version must look like "3.11"`)
+		return
+	}
+
 	var d models.DAG
 	err := h.DB.QueryRow(r.Context(), `
-		INSERT INTO dags (name, description, schedule, owner)
-		VALUES ($1, $2, $3, $4)
-		RETURNING id, name, description, schedule, owner, is_active, created_at, updated_at
-	`, req.Name, req.Description, req.Schedule, req.Owner).Scan(
-		&d.ID, &d.Name, &d.Description, &d.Schedule, &d.Owner, &d.IsActive, &d.CreatedAt, &d.UpdatedAt,
+		INSERT INTO dags (name, description, schedule, owner, python_version)
+		VALUES ($1, $2, $3, $4, $5)
+		RETURNING id, name, description, schedule, owner, is_active, python_version, created_at, updated_at
+	`, req.Name, req.Description, req.Schedule, req.Owner, req.PythonVersion).Scan(
+		&d.ID, &d.Name, &d.Description, &d.Schedule, &d.Owner, &d.IsActive, &d.PythonVersion, &d.CreatedAt, &d.UpdatedAt,
 	)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create dag")
@@ -205,6 +216,11 @@ func (h *DAGHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !validPythonVersion(req.PythonVersion) {
+		writeError(w, http.StatusBadRequest, `python_version must look like "3.11"`)
+		return
+	}
+
 	var d models.DAG
 	err = h.DB.QueryRow(r.Context(), `
 		UPDATE dags
@@ -213,11 +229,12 @@ func (h *DAGHandler) Update(w http.ResponseWriter, r *http.Request) {
 		    schedule = COALESCE($3, schedule),
 		    owner = COALESCE($4, owner),
 		    is_active = COALESCE($5, is_active),
+		    python_version = COALESCE($6, python_version),
 		    updated_at = NOW()
-		WHERE id = $6
-		RETURNING id, name, description, schedule, owner, is_active, created_at, updated_at
-	`, req.Name, req.Description, req.Schedule, req.Owner, req.IsActive, id).Scan(
-		&d.ID, &d.Name, &d.Description, &d.Schedule, &d.Owner, &d.IsActive, &d.CreatedAt, &d.UpdatedAt,
+		WHERE id = $7
+		RETURNING id, name, description, schedule, owner, is_active, python_version, created_at, updated_at
+	`, req.Name, req.Description, req.Schedule, req.Owner, req.IsActive, req.PythonVersion, id).Scan(
+		&d.ID, &d.Name, &d.Description, &d.Schedule, &d.Owner, &d.IsActive, &d.PythonVersion, &d.CreatedAt, &d.UpdatedAt,
 	)
 	if err == pgx.ErrNoRows {
 		writeError(w, http.StatusNotFound, "dag not found")

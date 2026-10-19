@@ -1,5 +1,18 @@
 basePath: /
 definitions:
+  handlers.TriggerRunResponse:
+    properties:
+      enqueued:
+        items:
+          type: string
+        type: array
+      run:
+        $ref: '#/definitions/models.Run'
+      task_instances:
+        items:
+          $ref: '#/definitions/models.TaskInstance'
+        type: array
+    type: object
   models.CreateDAGRequest:
     properties:
       description:
@@ -8,7 +21,16 @@ definitions:
         type: string
       owner:
         type: string
+      python_version:
+        type: string
       schedule:
+        type: string
+    type: object
+  models.CreateTaskDependencyRequest:
+    properties:
+      depends_on_task_id:
+        type: string
+      task_id:
         type: string
     type: object
   models.CreateTaskRequest:
@@ -34,6 +56,9 @@ definitions:
       name:
         type: string
       owner:
+        type: string
+      python_version:
+        description: e.g. "3.11"; NULL = the worker's own interpreter
         type: string
       schedule:
         type: string
@@ -72,6 +97,13 @@ definitions:
       task_type:
         type: string
     type: object
+  models.TaskDependency:
+    properties:
+      depends_on_task_id:
+        type: string
+      task_id:
+        type: string
+    type: object
   models.TaskInstance:
     properties:
       attempt:
@@ -80,8 +112,10 @@ definitions:
         type: string
       id:
         type: string
-      log_location:
+      logs:
         type: string
+      output:
+        type: object
       run_id:
         type: string
       started_at:
@@ -102,6 +136,8 @@ definitions:
       name:
         type: string
       owner:
+        type: string
+      python_version:
         type: string
       schedule:
         type: string
@@ -165,6 +201,133 @@ paths:
       summary: Create a DAG
       tags:
       - dags
+  /dags/{dagId}/dependencies:
+    get:
+      parameters:
+      - description: DAG ID
+        in: path
+        name: dagId
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/models.TaskDependency'
+            type: array
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: List dependencies for a DAG
+      tags:
+      - dependencies
+    post:
+      consumes:
+      - application/json
+      description: task_id will only run after depends_on_task_id succeeds. Both tasks
+        must belong to the DAG; self-dependencies, duplicates and cycles are rejected.
+      parameters:
+      - description: DAG ID
+        in: path
+        name: dagId
+        required: true
+        type: string
+      - description: Edge to add
+        in: body
+        name: dependency
+        required: true
+        schema:
+          $ref: '#/definitions/models.CreateTaskDependencyRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/models.TaskDependency'
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "404":
+          description: Not Found
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "409":
+          description: Conflict
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Make one task depend on another
+      tags:
+      - dependencies
+  /dags/{dagId}/dependencies/{taskId}/{dependsOnId}:
+    delete:
+      parameters:
+      - description: DAG ID
+        in: path
+        name: dagId
+        required: true
+        type: string
+      - description: Task that depends on the other
+        in: path
+        name: taskId
+        required: true
+        type: string
+      - description: Task it depends on
+        in: path
+        name: dependsOnId
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "204":
+          description: No Content
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "404":
+          description: Not Found
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Remove a dependency
+      tags:
+      - dependencies
   /dags/{dagId}/runs:
     get:
       parameters:
@@ -185,15 +348,22 @@ paths:
         "400":
           description: Bad Request
           schema:
-            type: string
+            additionalProperties:
+              type: string
+            type: object
         "500":
           description: Internal Server Error
           schema:
-            type: string
+            additionalProperties:
+              type: string
+            type: object
       summary: List runs for a DAG
       tags:
       - runs
     post:
+      description: Creates the run and one task instance per task, then enqueues the
+        tasks that have no dependencies. If Redis is down after the run is created,
+        the roots stay queued and a worker's sweeper re-enqueues them.
       parameters:
       - description: DAG ID
         in: path
@@ -206,46 +376,28 @@ paths:
         "201":
           description: Created
           schema:
-            $ref: '#/definitions/models.Run'
+            $ref: '#/definitions/handlers.TriggerRunResponse'
         "400":
           description: Bad Request
           schema:
-            type: string
+            additionalProperties:
+              type: string
+            type: object
+        "404":
+          description: Not Found
+          schema:
+            additionalProperties:
+              type: string
+            type: object
         "500":
           description: Internal Server Error
           schema:
-            type: string
+            additionalProperties:
+              type: string
+            type: object
       summary: Trigger a DAG run
       tags:
       - runs
-  /dags/{dagId}/task-instances:
-    get:
-      parameters:
-      - description: DAG ID
-        in: path
-        name: dagId
-        required: true
-        type: string
-      produces:
-      - application/json
-      responses:
-        "200":
-          description: OK
-          schema:
-            items:
-              $ref: '#/definitions/models.TaskInstance'
-            type: array
-        "400":
-          description: Bad Request
-          schema:
-            type: string
-        "500":
-          description: Internal Server Error
-          schema:
-            type: string
-      summary: List task instances
-      tags:
-      - task-instances
   /dags/{dagId}/tasks:
     get:
       parameters:
@@ -266,11 +418,15 @@ paths:
         "400":
           description: Bad Request
           schema:
-            type: string
+            additionalProperties:
+              type: string
+            type: object
         "500":
           description: Internal Server Error
           schema:
-            type: string
+            additionalProperties:
+              type: string
+            type: object
       summary: List tasks for a DAG
       tags:
       - tasks
@@ -455,18 +611,56 @@ paths:
         "400":
           description: Bad Request
           schema:
-            type: string
+            additionalProperties:
+              type: string
+            type: object
         "404":
           description: Not Found
           schema:
-            type: string
+            additionalProperties:
+              type: string
+            type: object
         "500":
           description: Internal Server Error
           schema:
-            type: string
+            additionalProperties:
+              type: string
+            type: object
       summary: Get a run
       tags:
       - runs
+  /runs/{runId}/task-instances:
+    get:
+      parameters:
+      - description: Run ID
+        in: path
+        name: runId
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/models.TaskInstance'
+            type: array
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: List task instances
+      tags:
+      - task-instances
   /task-instances/{id}:
     get:
       parameters:
@@ -485,15 +679,21 @@ paths:
         "400":
           description: Bad Request
           schema:
-            type: string
+            additionalProperties:
+              type: string
+            type: object
         "404":
           description: Not Found
           schema:
-            type: string
+            additionalProperties:
+              type: string
+            type: object
         "500":
           description: Internal Server Error
           schema:
-            type: string
+            additionalProperties:
+              type: string
+            type: object
       summary: Get a task instance
       tags:
       - task-instances
@@ -548,7 +748,9 @@ paths:
         "400":
           description: Bad Request
           schema:
-            type: string
+            additionalProperties:
+              type: string
+            type: object
         "404":
           description: Not Found
           schema:
@@ -558,7 +760,9 @@ paths:
         "500":
           description: Internal Server Error
           schema:
-            type: string
+            additionalProperties:
+              type: string
+            type: object
       summary: Get a task
       tags:
       - tasks

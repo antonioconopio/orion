@@ -28,14 +28,14 @@ func NewTaskHandler (db *pgxpool.Pool) *TaskHandler {
 // @Produce      json
 // @Param        dagId  path  string  true  "DAG ID"
 // @Success      200  {array}  models.Task
-// @Failure      400  {string}  string
-// @Failure      500  {string}  string
+// @Failure      400  {object}  map[string]string
+// @Failure      500  {object}  map[string]string
 // @Router       /dags/{dagId}/tasks [get]
 func (h *TaskHandler) List(w http.ResponseWriter, r *http.Request) {
 	dagId := r.PathValue("dagId")
 	id, err := uuid.Parse(dagId)
 	if err != nil {
-		http.Error(w, "invalid dag id", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "invalid dag id")
 		return
 	}
 
@@ -45,7 +45,7 @@ func (h *TaskHandler) List(w http.ResponseWriter, r *http.Request) {
 		WHERE dag_id = $1
 	`, id)
 	if err != nil {
-		http.Error(w, "failed to query tasks", http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "failed to query tasks")
 		return
 	}
 	defer rows.Close()
@@ -55,7 +55,7 @@ func (h *TaskHandler) List(w http.ResponseWriter, r *http.Request) {
 		var task models.Task
 		err := rows.Scan(&task.ID, &task.DAGID, &task.Name, &task.TaskType, &task.Config, &task.CreatedAt)
 		if err != nil {
-			http.Error(w, "failed to scan task", http.StatusInternalServerError)
+			writeError(w, http.StatusInternalServerError, "failed to scan task")
 			return
 		}
 		tasks = append(tasks, task)
@@ -73,15 +73,15 @@ func (h *TaskHandler) List(w http.ResponseWriter, r *http.Request) {
 // @Produce      json
 // @Param        id  path  string  true  "Task ID"
 // @Success      200  {object}  models.Task
-// @Failure      400  {string}  string
+// @Failure      400  {object}  map[string]string
 // @Failure      404  {object}  map[string]string
-// @Failure      500  {string}  string
+// @Failure      500  {object}  map[string]string
 // @Router       /tasks/{id} [get]
 func (h *TaskHandler) Get(w http.ResponseWriter, r *http.Request) {
 	idParam := r.PathValue("id")
 	id, err := uuid.Parse(idParam)
 	if err != nil {
-		http.Error(w, "invalid task id", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "invalid task id")
 		return
 	}
 	
@@ -98,7 +98,7 @@ func (h *TaskHandler) Get(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	if err != nil {
-		http.Error(w, "failed to query task", http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "failed to query task")
 		return
 	}
 

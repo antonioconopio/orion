@@ -5,63 +5,53 @@ from dotenv import load_dotenv
 
 import db, stream, executor
 
-load_dotenv(Path(__file__).resolve().parents[2] / ".env")   # adjust the number to your folder depth
-
 RECLAIM_EVERY = 30       # seconds between reclaim checks
-MIN_IDLE_MS = 120_000    # must be longer than your longest task
-
-db_url      = os.environ["DATABASE_URL"]
-redis_addr  = os.environ["REDIS_ADDR"]
-stream_name = os.environ["STREAM_NAME"]
-group_name  = os.environ["GROUP_NAME"]
-max_len     = int(os.environ["MAX_LEN"])
-
-consumer_name = f"{socket.gethostname()}-{os.getpid()}"
-
-pool   = db.get_pool(db_url)
-client = stream.get_redis_stream(redis_addr, stream_name, group_name, max_len)
+MIN_IDLE_MS = (executor.MAX_TIMEOUT + 20) * 1000   # a healthy task must never look dead
+STALE_QUEUED_S = 300     # a re-enqueue of a merely slow message is harmless: mark_running drops duplicates
 
 running = True
 def stop(*_):
     global running
     running = False
-signal.signal(signal.SIGTERM, stop)   # docker stop
-signal.signal(signal.SIGINT, stop)    # ctrl+c
 
 
-def process(message_id, fields):
+def process(pool, client, consumer_name, message_id, fields, reclaimed=False):
     instance_id = fields["task_instance_id"]
 
     conn = pool.getconn()
     try:
         with conn.cursor() as cursor:
-            if not db.mark_running(cursor, instance_id, consumer_name):    # add reclaimed=... later
+            if not db.mark_running(cursor, instance_id, consumer_name, reclaimed):
                 stream.acknowledge(client, message_id)
                 return
 
-            try:
-                task_type, config = db.get_task(cursor, instance_id)   # one query: type + full config
-            except Exception:
-                stream.acknowledge(client, message_id)
-                return
-
+            task = db.get_task(cursor, instance_id)   # (type, config) or None
             python_version = db.get_python_version(cursor, instance_id)
             conn.rollback()                                    # end the read transaction
 
-            result = executor.execute(task_type, config, python_version)
-
-            if result.success:
-                run_id = db.mark_success(cursor, instance_id)
-                ready_tasks = db.claim_ready_tasks(cursor, instance_id)
+            # the instance is 'running' now, so every path below must end in success/failed
+            if task is None:
+                result = executor.ExecResult(False, None, "", "task not found for instance")
             else:
-                run_id = db.mark_failed(cursor, instance_id)
-                ready_tasks = []
-            
-            db.write_log(cursor, instance_id, json.dumps({
+                try:
+                    result = executor.execute(*task, python_version)
+                except Exception as e:
+                    result = executor.ExecResult(False, None, "", f"executor crashed: {e!r}")
+
+            log = "\n" + json.dumps({
                 "stdout": result.stdout,
                 "stderr": result.stderr,
                 "timed_out": result.timed_out,
-            }))
+            })
+
+            # log is written in the same transaction as the status flip
+            if result.success:
+                run_id = db.mark_success(cursor, instance_id, log)
+                ready_tasks = db.claim_ready_tasks(cursor, instance_id)
+            else:
+                run_id = db.mark_failed(cursor, instance_id, log)
+                ready_tasks = []
+
             db.finalize_run(cursor, run_id)
     finally:
         pool.putconn(conn)
@@ -72,18 +62,49 @@ def process(message_id, fields):
     stream.acknowledge(client, message_id)
 
 
-last_reclaim = time.monotonic()
+def main():
+    load_dotenv(Path(__file__).resolve().parents[2] / ".env")   # adjust the number to your folder depth
 
-while running:
-    try:
-        for message_id, fields in stream.dequeue(client, consumer_name, count=1):
-            process(message_id, fields)
+    db_url      = os.environ["DATABASE_URL"]
+    redis_addr  = os.environ["REDIS_ADDR"]
+    stream_name = os.environ["STREAM_NAME"]
+    group_name  = os.environ["CONSUMER_GROUP"]              # same variable the Go API reads
+    max_len     = int(os.environ.get("MAX_LEN", "1000"))    # the API hardcodes 1000
 
-        if time.monotonic() - last_reclaim >= RECLAIM_EVERY:
-            last_reclaim = time.monotonic()
-            for message_id, fields in stream.claim_stale(client, consumer_name, MIN_IDLE_MS):
-                process(message_id, fields)
+    consumer_name = f"{socket.gethostname()}-{os.getpid()}"
 
-    except Exception:
-        traceback.print_exc()
-        time.sleep(1)
+    pool   = db.get_pool(db_url)
+    client = stream.get_redis_stream(redis_addr, stream_name, group_name, max_len)
+
+    signal.signal(signal.SIGTERM, stop)   # docker stop
+    signal.signal(signal.SIGINT, stop)    # ctrl+c
+
+    last_reclaim = time.monotonic()
+
+    while running:
+        try:
+            for message_id, fields in stream.dequeue(client, consumer_name, count=1):
+                process(pool, client, consumer_name, message_id, fields)
+
+            if time.monotonic() - last_reclaim >= RECLAIM_EVERY:
+                last_reclaim = time.monotonic()
+                for message_id, fields in stream.claim_stale(client, consumer_name, MIN_IDLE_MS):
+                    process(pool, client, consumer_name, message_id, fields, reclaimed=True)
+
+                # 'queued' in Postgres but never delivered (crash between claim and XADD)
+                conn = pool.getconn()
+                try:
+                    with conn.cursor() as cursor:
+                        stale = db.requeue_stale(cursor, STALE_QUEUED_S)
+                finally:
+                    pool.putconn(conn)
+                for instance_id in stale:
+                    stream.enqueue(client, instance_id)
+
+        except Exception:
+            traceback.print_exc()
+            time.sleep(1)
+
+
+if __name__ == "__main__":
+    main()

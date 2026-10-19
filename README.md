@@ -9,7 +9,7 @@ It is a monorepo of four parts:
 | API | `orion-api/` | Go 1.26, `net/http`, pgx, go-redis, swaggo | REST API; owns DAG/task/run CRUD, triggers runs, enqueues ready work |
 | Worker | `orion-worker/` | Python, psycopg2, redis-py | Consumes the queue, executes tasks, advances the DAG |
 | UI | `orion-ui/` | Next.js 16, React 19, Tailwind v4, shadcn, React Flow | Web console (currently a static skeleton) |
-| Infra | `orion-infra/` | Docker Compose | Local Postgres 16 and Redis 7 |
+| Infra | `orion-infra/` | Docker Compose | Local Postgres 16, Redis 7 and the worker container |
 
 Schema migrations live in `migrations/`.
 
@@ -19,7 +19,7 @@ Orion is a work in progress on branch `feature/python-worker`. The backend pipel
 
 | Area | State |
 | --- | --- |
-| Postgres schema + migrations | Done (3 migrations) |
+| Postgres schema + migrations | Done (4 migrations) |
 | API: DAG, task, run, task-instance endpoints | Done (a few gaps, see [Known gaps](#known-gaps)) |
 | API: Redis Streams queue + consumer groups | Done, with unit and end-to-end tests |
 | API tests | Done (HTTP and queue; need Postgres + Redis running) |
@@ -27,12 +27,14 @@ Orion is a work in progress on branch `feature/python-worker`. The backend pipel
 | Worker: consume, execute `python` tasks, mark status, write logs | Working |
 | Worker: DAG progression (enqueue downstream tasks, skip on failure, finalize run) | Working |
 | Worker: crash recovery via `XAUTOCLAIM` | Working |
+| Worker: stuck-`queued` sweeper (re-enqueues instances never delivered) | Working |
 | Scheduler (cron `schedule` field) | **Not implemented**; the field is stored but never acted on |
 | Task retries | **Not implemented**; the `retrying` status and `attempt` column exist but are unused |
 | Other task types (`shell`, `http`) | **Not implemented**; the schema allows any `task_type`, the worker only knows `python` |
 | UI | Static skeleton on hardcoded sample data; no API calls (see `orion-ui/README.md`) |
 | Auth | None |
-| Dockerfiles for API/worker/UI | None; only Postgres and Redis are containerized |
+| Worker container | Done: `orion-worker/Dockerfile`, a `worker` service in compose, Python 3.10 to 3.13 installed |
+| Dockerfiles for API/UI | None |
 
 ## How it works
 
@@ -64,7 +66,9 @@ Orion is a work in progress on branch `feature/python-worker`. The backend pipel
 
 ### Crash tolerance
 
-Every 30 seconds each worker runs `XAUTOCLAIM` to take over messages that another consumer received but never acked within 120 s (`MIN_IDLE_MS`). The per-task timeout is capped at 100 s so a healthy task can never be mistaken for a dead one. The `queued → running` transition is guarded by `WHERE status = 'queued'`, so a duplicate delivery is dropped instead of re-executed.
+Every 30 seconds each worker runs `XAUTOCLAIM` to take over messages that another consumer received but never acked within 120 s (`MIN_IDLE_MS`). The per-task timeout is capped at 100 s so a healthy task can never be mistaken for a dead one. The `queued → running` transition is guarded by `WHERE status = 'queued'`, so a duplicate delivery is dropped instead of re-executed. A reclaimed task is re-run, so tasks should be safe to run twice.
+
+The same loop also runs a sweeper: an instance that is `queued` in Postgres for more than 300 s (`STALE_QUEUED_S`) is re-enqueued. This covers a crash between a worker flipping children to `queued` and the `XADD`, and an API enqueue failure. `queued_at` (migration 4) records when an instance was queued; re-enqueueing a merely slow message is harmless because `mark_running` drops duplicates.
 
 ### Task execution (`python` type)
 
@@ -118,22 +122,18 @@ POSTGRES_USER=orion
 POSTGRES_PASSWORD=orion
 POSTGRES_DB=orion
 
-# Queue: API variables
+# Queue: shared by the API and the worker
 REDIS_ADDR=localhost:6379
 STREAM_NAME=orion:tasks_stream
 CONSUMER_GROUP=orion:workers
-
-# Queue: extra worker variables
-GROUP_NAME=orion:workers
-MAX_LEN=1000
 ```
 
-> The API and worker read the same `.env` but use **different variable names and formats** for the queue (see [Known gaps](#known-gaps)). `GROUP_NAME` must equal `CONSUMER_GROUP`, and `STREAM_NAME` must be identical. `REDIS_ADDR` is `host:port` for the API, but the worker passes it to `redis.Redis.from_url`, which expects a URL such as `redis://localhost:6379`. To run both from one file, either use separate env files or give the worker its value inline: `REDIS_ADDR=redis://localhost:6379 python worker/main.py`.
+> The API and the worker read the same `.env` and the same variable names. `REDIS_ADDR` can be `host:port` for both: the worker adds the `redis://` scheme itself if it is missing. The worker also accepts an optional `MAX_LEN` (stream length cap, default 1000, the value the API uses).
 
 ### 2. Start Postgres and Redis
 
 ```bash
-make up      # docker compose up -d (postgres :5432, redis :6379, with healthchecks and volumes)
+make up      # docker compose up -d --build (postgres :5432, redis :6379, plus one worker container)
 make down    # stop (volumes are kept)
 ```
 
@@ -144,7 +144,7 @@ migrate -path migrations -database "$DATABASE_URL" up
 # or apply the *.up.sql files in order with psql
 ```
 
-`000003_add_output_log_instances.up.sql` has no matching `.down.sql`.
+`000003_add_output_log_instances.up.sql` has no matching `.down.sql`. The API tests apply every `migrations/*.up.sql` to the throwaway `*_test` database.
 
 ### 4. Run the API
 
@@ -157,12 +157,16 @@ Health check: `curl localhost:8080/health`. Interactive docs: <http://localhost:
 
 To regenerate Swagger after changing handler annotations: `swag init` (from `orion-api/`).
 
-### 5. Run a worker
+### 5. Run workers
+
+`make up` already starts one containerized worker. To run more, `docker compose -f orion-infra/docker-compose.yml --env-file .env up -d --scale worker=3`. In the container the worker reads `postgres` and `redis` hostnames (set in the compose file, not your `.env`), and `docker stop` waits up to 110 s so a running task can finish. The image has Python 3.10, 3.11, 3.12 and 3.13, so a DAG's `python_version` must be one of those.
+
+To run a worker on your machine instead:
 
 ```bash
 cd orion-worker
 python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt python-dotenv
+pip install -r requirements.txt
 cd worker && python main.py
 ```
 
@@ -197,25 +201,28 @@ curl -s $API/dags/$DAG/runs | jq
 curl -s $API/task-instances/<instance-id> | jq
 ```
 
-Dependencies cannot be created through the API yet. To chain tasks, insert rows directly:
+To chain tasks, make one depend on another (`load` runs only after `transform` succeeds):
 
-```sql
-INSERT INTO task_dependencies (task_id, depends_on_task_id) VALUES ('<child-task-id>', '<parent-task-id>');
+```bash
+curl -s -X POST $API/dags/$DAG/dependencies -H 'Content-Type: application/json' \
+  -d '{"task_id":"<load-task-id>","depends_on_task_id":"<transform-task-id>"}'
 ```
 
-Setting a DAG's `python_version` also currently requires SQL (`UPDATE dags SET python_version = '3.11' WHERE id = ...`).
+Self-dependencies, duplicates and cycles are rejected (400 / 409).
+
+A DAG's `python_version` (e.g. `"3.11"`) can be set on create or update (`POST /dags`, `PUT /dags/{id}`); it must look like `3.<minor>`.
 
 ## API reference
 
-Served by `orion-api` on `PORT` (default 8080). Request and response bodies are JSON. CORS currently allows `http://localhost:5173` only.
+Served by `orion-api` on `PORT` (default 8080). Request and response bodies are JSON. CORS allows `http://localhost:3000` (the Next.js dev server) only. Errors are always `{"error": "..."}`.
 
 | Method | Path | Description |
 | --- | --- | --- |
 | GET | `/health` | Liveness check |
 | GET | `/dags` | List DAGs (newest first) |
-| POST | `/dags` | Create a DAG (`name` required; `description`, `schedule`, `owner` optional) |
+| POST | `/dags` | Create a DAG (`name` required; `description`, `schedule`, `owner`, `python_version` optional) |
 | GET | `/dags/{id}` | Get a DAG |
-| PUT | `/dags/{id}` | Partial update (`name`, `description`, `schedule`, `owner`, `is_active`) |
+| PUT | `/dags/{id}` | Partial update (`name`, `description`, `schedule`, `owner`, `is_active`, `python_version`) |
 | DELETE | `/dags/{id}` | Delete a DAG and everything under it |
 | GET | `/dags/{dagId}/tasks` | List a DAG's tasks |
 | POST | `/dags/{dagId}/tasks` | Create a task (`name`, `task_type`, `config`) |
@@ -223,12 +230,13 @@ Served by `orion-api` on `PORT` (default 8080). Request and response bodies are 
 | PUT | `/tasks/{id}` | Replace a task's `name`, `task_type`, `config` |
 | DELETE | `/tasks/{id}` | Delete a task |
 | GET | `/dags/{dagId}/runs` | List runs for a DAG |
-| POST | `/dags/{dagId}/runs` | Trigger a run; returns `{run, task_instances, enqueued}` |
+| POST | `/dags/{dagId}/runs` | Trigger a run; returns `{run, task_instances, enqueued}`. 404 for an unknown DAG, 400 for a DAG with no tasks. Atomic: nothing is left behind if it fails. |
 | GET | `/runs/{id}` | Get a run |
-| GET | `/dags/{runId}/task-instances` | List a run's task instances (the path segment is a **run** id; Swagger labels it `dagId`) |
+| GET | `/dags/{dagId}/dependencies` | List a DAG's dependency edges |
+| POST | `/dags/{dagId}/dependencies` | Add an edge (`task_id` runs after `depends_on_task_id`); 409 on duplicate or cycle |
+| DELETE | `/dags/{dagId}/dependencies/{taskId}/{dependsOnId}` | Remove an edge |
+| GET | `/runs/{runId}/task-instances` | List a run's task instances, including `logs`, `output`, `worker_id`, `attempt` and timestamps |
 | GET | `/task-instances/{id}` | Get a task instance |
-
-Error handling is not uniform yet: DAG endpoints return `{"error": "..."}`, while task list/get, run and task-instance endpoints often return plain-text errors.
 
 ## Testing
 
@@ -244,28 +252,39 @@ go test ./tests/...
 - Redis tests use uniquely named streams and delete them afterwards.
 - Overrides: `TEST_DATABASE_URL`, `TEST_REDIS_ADDR` (default `localhost:6379`).
 - Coverage: health, DAG/task CRUD and validation, run triggering (only dependency-free tasks are enqueued, once each), run/task-instance reads, queue semantics (idempotent group creation, FIFO, blocking reads, no duplicate delivery across consumers, ack idempotency, stale-claim recovery, `MAXLEN` trimming, context cancellation) and an end-to-end crashed-worker recovery test.
-- There are no automated tests for the Python worker or the UI.
+- There are no automated tests for the UI.
+
+The worker has its own `pytest` suite (executor behaviour, and every database state transition: start guard, success/failure, downstream skipping, diamond join, run finalization, stale re-queue). It uses the same `<db>_test` database, so run the Go tests once first to create it:
+
+```bash
+cd orion-worker
+.venv/bin/pip install -r requirements-dev.txt
+.venv/bin/python -m pytest tests
+```
 
 ## Repository layout
 
 ```
 .
 ├── Makefile                     # up / down for the local stack
-├── migrations/                  # SQL migrations (000001–000003)
+├── migrations/                  # SQL migrations (000001–000004)
 ├── orion-infra/docker-compose.yml
 ├── orion-api/
 │   ├── main.go                  # wiring: env, DB pool, queue, routes, CORS, Swagger
 │   ├── docs/                    # generated Swagger (docs.go, swagger.json/yaml)
 │   ├── internal/
 │   │   ├── db/                  # pgx pool
-│   │   ├── handlers/            # dags, tasks, runs, task_instances, health, routes
+│   │   ├── handlers/            # dags, tasks, dependencies, runs, task_instances, health, routes
 │   │   ├── models/              # DAG, Task, Run, TaskInstance, TaskDependency
 │   │   └── queue/               # Redis Streams wrapper (Enqueue/Dequeue/Ack/ClaimStale)
 │   └── tests/                   # HTTP, queue and end-to-end tests
 ├── orion-worker/
+│   ├── Dockerfile               # worker image (Python 3.10-3.13)
 │   ├── requirements.txt
+│   ├── requirements-dev.txt     # adds pytest
+│   ├── tests/                   # executor and database tests
 │   └── worker/
-│       ├── main.py              # consume loop, reclaim timer, graceful shutdown
+│       ├── main.py              # consume loop, reclaim and sweeper timer, graceful shutdown
 │       ├── db.py                # state transitions, DAG progression, logs
 │       ├── executor.py          # task executors (python)
 │       └── stream.py            # Redis Streams helpers
@@ -277,23 +296,12 @@ go test ./tests/...
 Things I found while documenting that you will hit when running the project:
 
 1. **No scheduler.** `dags.schedule` is stored but nothing triggers runs from it; runs are manual only (`triggered_by` is never set to `schedule`).
-2. **No API for dependencies or `python_version`.** Both are only settable through SQL. Create/Update DAG requests do not accept `python_version`.
-3. **Env var mismatch between API and worker.** The API reads `CONSUMER_GROUP`; the worker reads `GROUP_NAME` and `MAX_LEN`, which are not in the existing `.env` convention. `REDIS_ADDR` is `host:port` for Go but must be a `redis://` URL for Python.
-4. **`python-dotenv` is imported by the worker but missing from `requirements.txt`.**
-5. **The worker is a script that runs on import** (no `if __name__ == "__main__"`, and env is read at module level), so it needs to be run from the `worker/` directory with the sibling imports resolving.
-6. **Run status never becomes `running`.** The worker only finalizes a run to `success`/`failed`; `runs.started_at` is never set, and a run whose trigger enqueued nothing (e.g. a DAG with no tasks) stays `queued`.
-7. **API responses omit data the worker writes.** `Run` and `TaskInstance` reads return only id/dag/status (and `created_at` for runs); `logs`, `output`, `worker_id`, `attempt`, `started_at` and `finished_at` are not returned yet, so the UI cannot show logs from the API. The `TaskInstance` model still has a stale `log_location` field from before migration 2.
-8. **Triggering is not transactional.** A failure midway (e.g. Redis down after instances are inserted) leaves a partially created run, and triggering a nonexistent DAG id returns 500 rather than 404.
-9. **`/dags/{runId}/task-instances` is a misleading route name** and the Swagger annotation names the parameter `dagId`.
-10. **CORS origin is `http://localhost:5173`**, but the Next.js dev server runs on `:3000`; update `main.go` before connecting the UI.
-11. **Stray files:** `orion-api/go.mod` marks directly used modules (godotenv, go-redis, cors, swaggo) as `// indirect`; `go mod tidy` will fix this.
-12. **Worker trusts task code** (see the security note above) and no authentication exists anywhere.
+2. **Worker trusts task code** (see the security note above) and no authentication exists anywhere.
 
 ## Roadmap
 
 1. Wire the UI to the API (fetching, then live updates via SSE/WebSocket).
-2. Expose logs, timestamps and worker info through the API; add dependency and `python_version` endpoints.
-3. Add a scheduler for cron DAGs.
-4. Implement retries, run cancellation, and additional task types (`shell`, `http`).
-5. Containerize the API, worker and UI; add CI.
-6. Add worker tests and auth.
+2. Add a scheduler for cron DAGs.
+3. Implement retries, run cancellation, and additional task types (`shell`, `http`).
+4. Containerize the API and UI; add CI.
+5. Add auth.
