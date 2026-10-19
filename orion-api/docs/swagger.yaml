@@ -65,22 +65,97 @@ definitions:
       updated_at:
         type: string
     type: object
+  models.DAGSummary:
+    properties:
+      avg_duration_seconds:
+        description: over the same runs
+        type: number
+      created_at:
+        type: string
+      description:
+        description: pointer because it's nullable in the DB
+        type: string
+      id:
+        type: string
+      is_active:
+        type: boolean
+      last_run:
+        $ref: '#/definitions/models.RunBrief'
+      name:
+        type: string
+      owner:
+        type: string
+      python_version:
+        description: e.g. "3.11"; NULL = the worker's own interpreter
+        type: string
+      recent_durations:
+        description: seconds, oldest to newest, for the sparkline
+        items:
+          type: number
+        type: array
+      schedule:
+        type: string
+      success_rate:
+        description: 0..1 over the last 20 finished runs
+        type: number
+      updated_at:
+        type: string
+    type: object
   models.Run:
     properties:
       created_at:
         type: string
       dag_id:
         type: string
+      dag_name:
+        type: string
       finished_at:
         type: string
       id:
         type: string
+      number:
+        description: 'per-DAG sequence: the "#12" in the UI'
+        type: integer
       started_at:
         type: string
       status:
         type: string
+      tasks_done:
+        description: success + failed + skipped
+        type: integer
+      tasks_total:
+        type: integer
       triggered_by:
         type: string
+    type: object
+  models.RunBrief:
+    properties:
+      finished_at:
+        type: string
+      id:
+        type: string
+      number:
+        type: integer
+      started_at:
+        type: string
+      status:
+        type: string
+    type: object
+  models.Stats:
+    properties:
+      active_runs:
+        description: queued or running
+        type: integer
+      failed_24h:
+        type: integer
+      success_rate_24h:
+        description: 0..1; null when nothing finished in 24h
+        type: number
+      throughput_24h:
+        description: runs finished per hour, oldest first, 24 entries
+        items:
+          type: integer
+        type: array
     type: object
   models.Task:
     properties:
@@ -124,6 +199,8 @@ definitions:
         type: string
       task_id:
         type: string
+      task_name:
+        type: string
       worker_id:
         type: string
     type: object
@@ -142,6 +219,27 @@ definitions:
       schedule:
         type: string
     type: object
+  models.Worker:
+    properties:
+      current_run_id:
+        description: for linking to the run
+        type: string
+      current_task:
+        description: '"dag / task" while busy'
+        type: string
+      host:
+        type: string
+      id:
+        description: hostname-pid
+        type: string
+      pid:
+        type: integer
+      started_at:
+        type: string
+      status:
+        description: '"idle" or "busy"'
+        type: string
+    type: object
 host: localhost:8080
 info:
   contact: {}
@@ -158,7 +256,7 @@ paths:
           description: OK
           schema:
             items:
-              $ref: '#/definitions/models.DAG'
+              $ref: '#/definitions/models.DAGSummary'
             type: array
         "500":
           description: Internal Server Error
@@ -514,7 +612,7 @@ paths:
         "200":
           description: OK
           schema:
-            $ref: '#/definitions/models.DAG'
+            $ref: '#/definitions/models.DAGSummary'
         "400":
           description: Bad Request
           schema:
@@ -593,6 +691,45 @@ paths:
       summary: Health check
       tags:
       - health
+  /runs:
+    get:
+      parameters:
+      - description: Max rows (default 50, max 200)
+        in: query
+        name: limit
+        type: integer
+      - description: Only runs with this status
+        in: query
+        name: status
+        type: string
+      - description: Only runs of this DAG
+        in: query
+        name: dag_id
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/models.Run'
+            type: array
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: List runs across all DAGs, newest first
+      tags:
+      - runs
   /runs/{id}:
     get:
       parameters:
@@ -661,6 +798,26 @@ paths:
       summary: List task instances
       tags:
       - task-instances
+  /stats:
+    get:
+      description: Active runs, 24h success rate and failures, and runs finished per
+        hour for the last 24 hours (oldest first).
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.Stats'
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Dashboard numbers
+      tags:
+      - stats
   /task-instances/{id}:
     get:
       parameters:
@@ -809,4 +966,36 @@ paths:
       summary: Update a task
       tags:
       - tasks
+  /workers:
+    get:
+      description: Read from worker heartbeats in Redis; a worker that stops heartbeating
+        (about 15 seconds) drops out of the list.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/models.Worker'
+            type: array
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: List live workers
+      tags:
+      - workers
+  /ws:
+    get:
+      description: Upgrades to a WebSocket and pushes small JSON hints such as {"type":"run","run_id":"...","dag_id":"..."}
+        whenever a run or worker changes. Re-fetch the affected resource over REST.
+      responses:
+        "101":
+          description: Switching Protocols
+      summary: Live events (WebSocket)
+      tags:
+      - events
 swagger: "2.0"

@@ -30,7 +30,7 @@ const docTemplate = `{
                         "schema": {
                             "type": "array",
                             "items": {
-                                "$ref": "#/definitions/models.DAG"
+                                "$ref": "#/definitions/models.DAGSummary"
                             }
                         }
                     },
@@ -515,7 +515,7 @@ const docTemplate = `{
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "$ref": "#/definitions/models.DAG"
+                            "$ref": "#/definitions/models.DAGSummary"
                         }
                     },
                     "400": {
@@ -685,6 +685,66 @@ const docTemplate = `{
                 }
             }
         },
+        "/runs": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "runs"
+                ],
+                "summary": "List runs across all DAGs, newest first",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "Max rows (default 50, max 200)",
+                        "name": "limit",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Only runs with this status",
+                        "name": "status",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Only runs of this DAG",
+                        "name": "dag_id",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/models.Run"
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
+        },
         "/runs/{id}": {
             "get": {
                 "produces": [
@@ -775,6 +835,35 @@ const docTemplate = `{
                             "additionalProperties": {
                                 "type": "string"
                             }
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/stats": {
+            "get": {
+                "description": "Active runs, 24h success rate and failures, and runs finished per hour for the last 24 hours (oldest first).",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "stats"
+                ],
+                "summary": "Dashboard numbers",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/models.Stats"
                         }
                     },
                     "500": {
@@ -1013,6 +1102,52 @@ const docTemplate = `{
                     }
                 }
             }
+        },
+        "/workers": {
+            "get": {
+                "description": "Read from worker heartbeats in Redis; a worker that stops heartbeating (about 15 seconds) drops out of the list.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "workers"
+                ],
+                "summary": "List live workers",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/models.Worker"
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/ws": {
+            "get": {
+                "description": "Upgrades to a WebSocket and pushes small JSON hints such as {\"type\":\"run\",\"run_id\":\"...\",\"dag_id\":\"...\"} whenever a run or worker changes. Re-fetch the affected resource over REST.",
+                "tags": [
+                    "events"
+                ],
+                "summary": "Live events (WebSocket)",
+                "responses": {
+                    "101": {
+                        "description": "Switching Protocols"
+                    }
+                }
+            }
         }
     },
     "definitions": {
@@ -1115,6 +1250,58 @@ const docTemplate = `{
                 }
             }
         },
+        "models.DAGSummary": {
+            "type": "object",
+            "properties": {
+                "avg_duration_seconds": {
+                    "description": "over the same runs",
+                    "type": "number"
+                },
+                "created_at": {
+                    "type": "string"
+                },
+                "description": {
+                    "description": "pointer because it's nullable in the DB",
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "is_active": {
+                    "type": "boolean"
+                },
+                "last_run": {
+                    "$ref": "#/definitions/models.RunBrief"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "owner": {
+                    "type": "string"
+                },
+                "python_version": {
+                    "description": "e.g. \"3.11\"; NULL = the worker's own interpreter",
+                    "type": "string"
+                },
+                "recent_durations": {
+                    "description": "seconds, oldest to newest, for the sparkline",
+                    "type": "array",
+                    "items": {
+                        "type": "number"
+                    }
+                },
+                "schedule": {
+                    "type": "string"
+                },
+                "success_rate": {
+                    "description": "0..1 over the last 20 finished runs",
+                    "type": "number"
+                },
+                "updated_at": {
+                    "type": "string"
+                }
+            }
+        },
         "models.Run": {
             "type": "object",
             "properties": {
@@ -1124,11 +1311,18 @@ const docTemplate = `{
                 "dag_id": {
                     "type": "string"
                 },
+                "dag_name": {
+                    "type": "string"
+                },
                 "finished_at": {
                     "type": "string"
                 },
                 "id": {
                     "type": "string"
+                },
+                "number": {
+                    "description": "per-DAG sequence: the \"#12\" in the UI",
+                    "type": "integer"
                 },
                 "started_at": {
                     "type": "string"
@@ -1136,8 +1330,58 @@ const docTemplate = `{
                 "status": {
                     "type": "string"
                 },
+                "tasks_done": {
+                    "description": "success + failed + skipped",
+                    "type": "integer"
+                },
+                "tasks_total": {
+                    "type": "integer"
+                },
                 "triggered_by": {
                     "type": "string"
+                }
+            }
+        },
+        "models.RunBrief": {
+            "type": "object",
+            "properties": {
+                "finished_at": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "number": {
+                    "type": "integer"
+                },
+                "started_at": {
+                    "type": "string"
+                },
+                "status": {
+                    "type": "string"
+                }
+            }
+        },
+        "models.Stats": {
+            "type": "object",
+            "properties": {
+                "active_runs": {
+                    "description": "queued or running",
+                    "type": "integer"
+                },
+                "failed_24h": {
+                    "type": "integer"
+                },
+                "success_rate_24h": {
+                    "description": "0..1; null when nothing finished in 24h",
+                    "type": "number"
+                },
+                "throughput_24h": {
+                    "description": "runs finished per hour, oldest first, 24 entries",
+                    "type": "array",
+                    "items": {
+                        "type": "integer"
+                    }
                 }
             }
         },
@@ -1205,6 +1449,9 @@ const docTemplate = `{
                 "task_id": {
                     "type": "string"
                 },
+                "task_name": {
+                    "type": "string"
+                },
                 "worker_id": {
                     "type": "string"
                 }
@@ -1229,6 +1476,36 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "schedule": {
+                    "type": "string"
+                }
+            }
+        },
+        "models.Worker": {
+            "type": "object",
+            "properties": {
+                "current_run_id": {
+                    "description": "for linking to the run",
+                    "type": "string"
+                },
+                "current_task": {
+                    "description": "\"dag / task\" while busy",
+                    "type": "string"
+                },
+                "host": {
+                    "type": "string"
+                },
+                "id": {
+                    "description": "hostname-pid",
+                    "type": "string"
+                },
+                "pid": {
+                    "type": "integer"
+                },
+                "started_at": {
+                    "type": "string"
+                },
+                "status": {
+                    "description": "\"idle\" or \"busy\"",
                     "type": "string"
                 }
             }
