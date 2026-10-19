@@ -39,3 +39,11 @@ def conn():
 def cur(conn):
     with conn.cursor() as cursor:
         yield cursor
+
+
+@pytest.fixture
+def pool(conn):
+    from psycopg2 import pool as pg_pool
+    p = pg_pool.SimpleConnectionPool(1, 3, _test_db_url())
+    yield p
+    p.closeall()

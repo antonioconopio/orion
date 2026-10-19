@@ -1,45 +1,9 @@
 import pytest
 
 import db
+from helpers import seed, status, set_status, run_status
 
 OLD = "NOW() - INTERVAL '10 minutes'"
-
-
-def seed(cur, tasks, deps=(), status="pending", python_version=None, config="{}"):
-    """One DAG, one run, one instance per task. deps is [(child, parent)] by task name."""
-    cur.execute("INSERT INTO dags (name, python_version) VALUES ('d', %s) RETURNING id", (python_version,))
-    dag_id = cur.fetchone()[0]
-    task_ids = {}
-    for name in tasks:
-        cur.execute("INSERT INTO tasks (dag_id, name, task_type, config) VALUES (%s, %s, 'python', %s) RETURNING id",
-                    (dag_id, name, config))
-        task_ids[name] = cur.fetchone()[0]
-    for child, parent in deps:
-        cur.execute("INSERT INTO task_dependencies VALUES (%s, %s)", (task_ids[child], task_ids[parent]))
-    cur.execute("INSERT INTO runs (dag_id, number) VALUES (%s, 1) RETURNING id", (dag_id,))
-    run_id = cur.fetchone()[0]
-    inst = {}
-    for name in tasks:
-        cur.execute("INSERT INTO task_instances (run_id, task_id, status) VALUES (%s, %s, %s) RETURNING id",
-                    (run_id, task_ids[name], status))
-        inst[name] = cur.fetchone()[0]
-    cur.connection.commit()
-    return run_id, inst
-
-
-def status(cur, instance_id):
-    cur.execute("SELECT status FROM task_instances WHERE id = %s", (instance_id,))
-    return cur.fetchone()[0]
-
-
-def set_status(cur, instance_id, new):
-    cur.execute("UPDATE task_instances SET status = %s WHERE id = %s", (new, instance_id))
-    cur.connection.commit()
-
-
-def run_status(cur, run_id):
-    cur.execute("SELECT status, started_at, finished_at FROM runs WHERE id = %s", (run_id,))
-    return cur.fetchone()
 
 
 DIAMOND = dict(tasks=["a", "b", "c", "d"], deps=[("b", "a"), ("c", "a"), ("d", "b"), ("d", "c")])
@@ -233,3 +197,4 @@ def test_lookups_return_none_for_unknown_instance(cur):
     unknown = "00000000-0000-0000-0000-000000000000"
     assert db.get_task(cur, unknown) is None
     assert db.get_python_version(cur, unknown) is None
+
