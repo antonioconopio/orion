@@ -74,6 +74,9 @@ func NewStream(ctx context.Context, addr, name, group string, maxLen int64) (*St
 }
 
 
+// Client exposes the underlying Redis connection for the event hub and the workers endpoint.
+func (s *Stream) Client() *redis.Client { return s.client }
+
 // Enqueue adds a task instance to the stream. Returns the Redis-assigned
 // message ID (useful for logging/debugging, not something you need to
 // store anywhere).

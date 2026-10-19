@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"net/http"
+	"orion-api/internal/events"
 	"orion-api/internal/queue"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -9,13 +10,15 @@ import (
 
 // RegisterRoutes wires every API endpoint onto mux. It lives here (rather
 // than in main) so tests exercise the exact same routing table as prod.
-func RegisterRoutes(mux *http.ServeMux, pool *pgxpool.Pool, queue *queue.Stream) {
+func RegisterRoutes(mux *http.ServeMux, pool *pgxpool.Pool, queue *queue.Stream, hub *events.Hub, uiOrigin string) {
 	dagHandler := NewDAGHandler(pool)
 	taskHandler := NewTaskHandler(pool)
 	runHandler := NewRunHandler(pool, queue)
 	taskInstanceHandler := NewTaskInstanceHandler(pool)
 	dependencyHandler := NewDependencyHandler(pool)
 	statsHandler := NewStatsHandler(pool)
+	workerHandler := NewWorkerHandler(pool, queue.Client())
+	wsHandler := NewWSHandler(hub, uiOrigin)
 
 	// Health endpoint
 	mux.HandleFunc("/health", Health)
@@ -44,6 +47,10 @@ func RegisterRoutes(mux *http.ServeMux, pool *pgxpool.Pool, queue *queue.Stream)
 	mux.HandleFunc("GET /runs", runHandler.ListAll)
 	mux.HandleFunc("GET /runs/{id}", runHandler.Get)
 	mux.HandleFunc("POST /dags/{dagId}/runs", runHandler.Trigger)
+
+	// Workers and live events
+	mux.HandleFunc("GET /workers", workerHandler.List)
+	mux.HandleFunc("GET /ws", wsHandler.Serve)
 
 	// Dashboard
 	mux.HandleFunc("GET /stats", statsHandler.Get)

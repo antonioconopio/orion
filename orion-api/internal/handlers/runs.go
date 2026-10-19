@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"log"
 	"net/http"
 	"strconv"
 
@@ -8,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"orion-api/internal/events"
 	"orion-api/internal/models"
 	"orion-api/internal/queue"
 )
@@ -249,6 +251,13 @@ func (h *RunHandler) Trigger(w http.ResponseWriter, r *http.Request) {
 	if err := tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to commit run")
 		return
+	}
+
+	// Tell connected browsers a new run exists (best-effort: the run is already saved either way).
+	if err := events.Publish(r.Context(), h.Queue.Client(), events.Event{
+		Type: events.TypeRun, RunID: run.ID.String(), DAGID: run.DAGID.String(),
+	}); err != nil {
+		log.Printf("publish run event: %v", err)
 	}
 
 	// Enqueue only after the commit, so a worker never sees a message for a row that is not there yet.
