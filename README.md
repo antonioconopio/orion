@@ -13,6 +13,14 @@ It is a monorepo of four parts:
 
 Schema migrations live in `migrations/`.
 
+## Demo
+
+
+
+https://github.com/user-attachments/assets/6d821cd9-0593-4d66-b6c4-3c9639b12dce
+
+
+
 ## Status
 
 Orion is a work in progress on branch `feature/python-worker`. The backend pipeline works end to end for **manual runs of Python tasks**. The UI is wired to the API and updates live over a WebSocket.
