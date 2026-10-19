@@ -46,25 +46,21 @@ func writeError(w http.ResponseWriter, status int, message string) {
 // @Summary      List all DAGs
 // @Tags         dags
 // @Produce      json
-// @Success      200  {array}  models.DAG
+// @Success      200  {array}  models.DAGSummary
 // @Failure      500  {object}  map[string]string
 // @Router       /dags [get]
 func (h *DAGHandler) List(w http.ResponseWriter, r *http.Request) {
-	rows, err := h.DB.Query(r.Context(), `
-		SELECT id, name, description, schedule, owner, is_active, python_version, created_at, updated_at
-		FROM dags
-		ORDER BY created_at DESC
-	`)
+	rows, err := h.DB.Query(r.Context(), dagSummarySelect+` ORDER BY d.created_at DESC`)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to query dags")
 		return
 	}
 	defer rows.Close()
 
-	dags := []models.DAG{}
+	dags := []models.DAGSummary{}
 	for rows.Next() {
-		var d models.DAG
-		if err := rows.Scan(&d.ID, &d.Name, &d.Description, &d.Schedule, &d.Owner, &d.IsActive, &d.PythonVersion, &d.CreatedAt, &d.UpdatedAt); err != nil {
+		var d models.DAGSummary
+		if err := scanDAGSummary(rows, &d); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to read dag row")
 			return
 		}
@@ -81,7 +77,7 @@ func (h *DAGHandler) List(w http.ResponseWriter, r *http.Request) {
 // @Tags         dags
 // @Produce      json
 // @Param        id  path  string  true  "DAG ID"
-// @Success      200  {object}  models.DAG
+// @Success      200  {object}  models.DAGSummary
 // @Failure      400  {object}  map[string]string
 // @Failure      404  {object}  map[string]string
 // @Failure      500  {object}  map[string]string
@@ -94,12 +90,8 @@ func (h *DAGHandler) Get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var d models.DAG
-	err = h.DB.QueryRow(r.Context(), `
-		SELECT id, name, description, schedule, owner, is_active, python_version, created_at, updated_at
-		FROM dags
-		WHERE id = $1
-	`, id).Scan(&d.ID, &d.Name, &d.Description, &d.Schedule, &d.Owner, &d.IsActive, &d.PythonVersion, &d.CreatedAt, &d.UpdatedAt)
+	var d models.DAGSummary
+	err = scanDAGSummary(h.DB.QueryRow(r.Context(), dagSummarySelect+` WHERE d.id = $1`, id), &d)
 
 	if err == pgx.ErrNoRows {
 		writeError(w, http.StatusNotFound, "dag not found")

@@ -15,6 +15,7 @@ func RegisterRoutes(mux *http.ServeMux, pool *pgxpool.Pool, queue *queue.Stream)
 	runHandler := NewRunHandler(pool, queue)
 	taskInstanceHandler := NewTaskInstanceHandler(pool)
 	dependencyHandler := NewDependencyHandler(pool)
+	statsHandler := NewStatsHandler(pool)
 
 	// Health endpoint
 	mux.HandleFunc("/health", Health)
@@ -40,8 +41,12 @@ func RegisterRoutes(mux *http.ServeMux, pool *pgxpool.Pool, queue *queue.Stream)
 
 	// Run endpoints
 	mux.HandleFunc("GET /dags/{dagId}/runs", runHandler.List)
+	mux.HandleFunc("GET /runs", runHandler.ListAll)
 	mux.HandleFunc("GET /runs/{id}", runHandler.Get)
 	mux.HandleFunc("POST /dags/{dagId}/runs", runHandler.Trigger)
+
+	// Dashboard
+	mux.HandleFunc("GET /stats", statsHandler.Get)
 
 	// Task Instance endpoints
 	mux.HandleFunc("GET /runs/{runId}/task-instances", taskInstanceHandler.List)

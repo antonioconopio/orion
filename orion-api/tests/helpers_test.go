@@ -123,7 +123,7 @@ func ensureSchema(ctx context.Context, pool *pgxpool.Pool) (*pgxpool.Pool, error
 	// the newest column stands in for "schema is current"; otherwise rebuild the throwaway DB
 	var current bool
 	if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM information_schema.columns
-		WHERE table_name = 'task_instances' AND column_name = 'queued_at')`).Scan(&current); err != nil {
+		WHERE table_name = 'dags' AND column_name = 'run_counter')`).Scan(&current); err != nil {
 		return nil, err
 	}
 	if current {

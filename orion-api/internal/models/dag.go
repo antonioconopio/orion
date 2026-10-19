@@ -41,3 +41,21 @@ type UpdateDAGRequest struct {
 	IsActive      *bool   `json:"is_active"`
 	PythonVersion *string `json:"python_version"`
 }
+
+// RunBrief is the slice of a run a DAG row needs.
+type RunBrief struct {
+	ID         uuid.UUID  `json:"id"`
+	Number     int        `json:"number"`
+	Status     string     `json:"status"`
+	StartedAt  *time.Time `json:"started_at"`
+	FinishedAt *time.Time `json:"finished_at"`
+}
+
+// DAGSummary is a DAG plus stats derived from its recent runs (list and get).
+type DAGSummary struct {
+	DAG
+	LastRun            *RunBrief `json:"last_run"`
+	SuccessRate        *float64  `json:"success_rate"`         // 0..1 over the last 20 finished runs
+	AvgDurationSeconds *float64  `json:"avg_duration_seconds"` // over the same runs
+	RecentDurations    []float64 `json:"recent_durations"`     // seconds, oldest to newest, for the sparkline
+}

@@ -16,7 +16,7 @@ def seed(cur, tasks, deps=(), status="pending", python_version=None, config="{}"
         task_ids[name] = cur.fetchone()[0]
     for child, parent in deps:
         cur.execute("INSERT INTO task_dependencies VALUES (%s, %s)", (task_ids[child], task_ids[parent]))
-    cur.execute("INSERT INTO runs (dag_id) VALUES (%s) RETURNING id", (dag_id,))
+    cur.execute("INSERT INTO runs (dag_id, number) VALUES (%s, 1) RETURNING id", (dag_id,))
     run_id = cur.fetchone()[0]
     inst = {}
     for name in tasks:
@@ -155,7 +155,7 @@ def test_claim_ready_tasks_stamps_queued_at(cur):
 def test_claim_ready_tasks_stays_inside_its_own_run(cur):
     run1, inst1 = seed(cur, ["a", "b"], deps=[("b", "a")])
     cur.execute("SELECT dag_id FROM runs WHERE id = %s", (run1,))
-    cur.execute("INSERT INTO runs (dag_id) VALUES (%s) RETURNING id", (cur.fetchone()[0],))
+    cur.execute("INSERT INTO runs (dag_id, number) VALUES (%s, 2) RETURNING id", (cur.fetchone()[0],))
     run2 = cur.fetchone()[0]
     cur.execute("INSERT INTO task_instances (run_id, task_id, status) "
                 "SELECT %s, task_id, 'pending' FROM task_instances WHERE run_id = %s", (run2, run1))
