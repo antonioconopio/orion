@@ -31,6 +31,22 @@ services:
       timeout: 5s
       retries: 5
 
+  worker:
+    build: ../orion-worker
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
+      REDIS_ADDR: redis:6379
+      STREAM_NAME: ${STREAM_NAME}
+      CONSUMER_GROUP: ${CONSUMER_GROUP}
+    # lets a running task finish on `docker stop` (task timeout cap is 100s)
+    stop_grace_period: 110s
+
 volumes:
   orion_postgres_data:
   orion_redis_data:

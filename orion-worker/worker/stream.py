@@ -10,7 +10,9 @@ class RedisStream:
 
 
 def get_redis_stream(redis_addr: str, stream_name: str, group_name: str, max_len: int) -> RedisStream:
-    r = redis.Redis.from_url(redis_addr, decode_responses=True)
+    # the Go API wants host:port; from_url wants a scheme, so accept both from one .env
+    url = redis_addr if "://" in redis_addr else f"redis://{redis_addr}"
+    r = redis.Redis.from_url(url, decode_responses=True)
     r.ping()  # fail fast if Redis isn't reachable
 
     try:
