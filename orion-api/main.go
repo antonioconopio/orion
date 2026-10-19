@@ -62,7 +62,7 @@ func main() {
 	mux.Handle("GET /swagger/", httpSwagger.WrapHandler)
 
 	handler := cors.New(cors.Options{
-		AllowedOrigins: []string{"http://localhost:5173"}, // your Vite dev server, not "*"
+		AllowedOrigins: []string{"http://localhost:3000"}, // the Next.js dev server, not "*"
 		AllowedMethods: []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
 		AllowedHeaders: []string{"Content-Type"},
 	}).Handler(mux)

@@ -14,6 +14,7 @@ func RegisterRoutes(mux *http.ServeMux, pool *pgxpool.Pool, queue *queue.Stream)
 	taskHandler := NewTaskHandler(pool)
 	runHandler := NewRunHandler(pool, queue)
 	taskInstanceHandler := NewTaskInstanceHandler(pool)
+	dependencyHandler := NewDependencyHandler(pool)
 
 	// Health endpoint
 	mux.HandleFunc("/health", Health)
@@ -32,12 +33,17 @@ func RegisterRoutes(mux *http.ServeMux, pool *pgxpool.Pool, queue *queue.Stream)
 	mux.HandleFunc("PUT /tasks/{id}", taskHandler.Update)
 	mux.HandleFunc("DELETE /tasks/{id}", taskHandler.Delete)
 
+	// Dependency endpoints
+	mux.HandleFunc("GET /dags/{dagId}/dependencies", dependencyHandler.List)
+	mux.HandleFunc("POST /dags/{dagId}/dependencies", dependencyHandler.Create)
+	mux.HandleFunc("DELETE /dags/{dagId}/dependencies/{taskId}/{dependsOnId}", dependencyHandler.Delete)
+
 	// Run endpoints
 	mux.HandleFunc("GET /dags/{dagId}/runs", runHandler.List)
 	mux.HandleFunc("GET /runs/{id}", runHandler.Get)
 	mux.HandleFunc("POST /dags/{dagId}/runs", runHandler.Trigger)
 
 	// Task Instance endpoints
-	mux.HandleFunc("GET /dags/{runId}/task-instances", taskInstanceHandler.List)
+	mux.HandleFunc("GET /runs/{runId}/task-instances", taskInstanceHandler.List)
 	mux.HandleFunc("GET /task-instances/{id}", taskInstanceHandler.Get)
 }

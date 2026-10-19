@@ -11,8 +11,8 @@ type Run struct {
 	DAGID    	uuid.UUID 	`json:"dag_id"`
 	Status   	string    	`json:"status"`
 	TriggeredBy string   	`json:"triggered_by"`
-	StartedAt 	time.Time 	`json:"started_at"`
-	FinishedAt 	time.Time 	`json:"finished_at"`
+	StartedAt 	*time.Time 	`json:"started_at"`
+	FinishedAt 	*time.Time 	`json:"finished_at"`
 	CreatedAt 	time.Time 	`json:"created_at"`
 }
 
