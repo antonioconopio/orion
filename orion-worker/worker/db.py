@@ -198,6 +198,24 @@ def get_task(cursor, instance_id: str):
         cursor.connection.rollback()
         raise
     
+def get_run_and_dag(cursor, instance_id: str):
+    # (run_id, dag_id) of an instance, for the events browsers listen to
+    try:
+        cursor.execute(
+            """
+            SELECT ti.run_id, r.dag_id
+            FROM task_instances ti
+            JOIN runs r ON r.id = ti.run_id
+            WHERE ti.id = %s
+            """,
+            (instance_id,),
+        )
+        row = cursor.fetchone()
+        return (row[0], row[1]) if row else None
+    except Exception:
+        cursor.connection.rollback()
+        raise
+
 def get_python_version(cursor: psycopg2.extensions.cursor, instance_id: str) -> str | None:
     try:
         cursor.execute(

@@ -3,7 +3,8 @@ import os, time, socket, signal, traceback
 from pathlib import Path
 from dotenv import load_dotenv
 
-import db, stream, executor
+import db, stream, executor, events
+from heartbeat import Heartbeat
 
 RECLAIM_EVERY = 30       # seconds between reclaim checks
 MIN_IDLE_MS = (executor.MAX_TIMEOUT + 20) * 1000   # a healthy task must never look dead
@@ -15,8 +16,9 @@ def stop(*_):
     running = False
 
 
-def process(pool, client, consumer_name, message_id, fields, reclaimed=False):
+def process(pool, client, consumer_name, message_id, fields, reclaimed=False, hb=None):
     instance_id = fields["task_instance_id"]
+    rdb = client.client
 
     conn = pool.getconn()
     try:
@@ -25,9 +27,15 @@ def process(pool, client, consumer_name, message_id, fields, reclaimed=False):
                 stream.acknowledge(client, message_id)
                 return
 
+            if hb:
+                hb.busy(instance_id)
             task = db.get_task(cursor, instance_id)   # (type, config) or None
             python_version = db.get_python_version(cursor, instance_id)
+            ids = db.get_run_and_dag(cursor, instance_id)
             conn.rollback()                                    # end the read transaction
+
+            if ids:
+                events.run_changed(rdb, *ids)   # the task just started
 
             # the instance is 'running' now, so every path below must end in success/failed
             if task is None:
@@ -53,8 +61,12 @@ def process(pool, client, consumer_name, message_id, fields, reclaimed=False):
                 ready_tasks = []
 
             db.finalize_run(cursor, run_id)
+            if ids:
+                events.run_changed(rdb, *ids)   # status, logs, skipped/queued children and run status are all committed
     finally:
         pool.putconn(conn)
+        if hb:
+            hb.idle()
 
     for ready_task_id in ready_tasks:
         stream.enqueue(client, ready_task_id)
@@ -79,17 +91,20 @@ def main():
     signal.signal(signal.SIGTERM, stop)   # docker stop
     signal.signal(signal.SIGINT, stop)    # ctrl+c
 
+    hb = Heartbeat(client.client, consumer_name)
+    hb.start()
+
     last_reclaim = time.monotonic()
 
     while running:
         try:
             for message_id, fields in stream.dequeue(client, consumer_name, count=1):
-                process(pool, client, consumer_name, message_id, fields)
+                process(pool, client, consumer_name, message_id, fields, hb=hb)
 
             if time.monotonic() - last_reclaim >= RECLAIM_EVERY:
                 last_reclaim = time.monotonic()
                 for message_id, fields in stream.claim_stale(client, consumer_name, MIN_IDLE_MS):
-                    process(pool, client, consumer_name, message_id, fields, reclaimed=True)
+                    process(pool, client, consumer_name, message_id, fields, reclaimed=True, hb=hb)
 
                 # 'queued' in Postgres but never delivered (crash between claim and XADD)
                 conn = pool.getconn()
@@ -104,6 +119,8 @@ def main():
         except Exception:
             traceback.print_exc()
             time.sleep(1)
+
+    hb.stop()
 
 
 if __name__ == "__main__":
