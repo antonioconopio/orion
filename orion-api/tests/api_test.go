@@ -632,3 +632,195 @@ func TestErrorsAreJSON(t *testing.T) {
 		}
 	}
 }
+
+// ---------- Read model for the UI ----------
+
+// finishRun marks a run finished `secs` seconds after it started, as a worker would.
+func (c *apiClient) finishRun(runID, status string, secs float64) {
+	c.t.Helper()
+	if _, err := c.pool.Exec(context.Background(), `UPDATE runs SET status = $2,
+		started_at = NOW() - make_interval(secs => $3), finished_at = NOW() WHERE id = $1`, runID, status, secs); err != nil {
+		c.t.Fatal(err)
+	}
+}
+
+type runFull struct {
+	ID         string  `json:"id"`
+	DAGID      string  `json:"dag_id"`
+	DAGName    string  `json:"dag_name"`
+	Number     int     `json:"number"`
+	Status     string  `json:"status"`
+	TasksTotal int     `json:"tasks_total"`
+	TasksDone  int     `json:"tasks_done"`
+	StartedAt  *string `json:"started_at"`
+}
+
+func TestRunNumbersAreSequentialPerDAG(t *testing.T) {
+	c := newAPI(t)
+	a, b := c.createDAG("a"), c.createDAG("b")
+	c.createTask(a.ID, "t")
+	c.createTask(b.ID, "t")
+
+	var got []runFull
+	for _, id := range []string{a.ID, a.ID, b.ID, a.ID} {
+		var r struct{ Run runFull }
+		c.call("POST", "/dags/"+id+"/runs", nil, http.StatusCreated, &r)
+		got = append(got, r.Run)
+	}
+	for i, want := range []int{1, 2, 1, 3} {
+		if got[i].Number != want {
+			t.Fatalf("run %d number = %d, want %d", i, got[i].Number, want)
+		}
+	}
+	if got[0].DAGName != "a" || got[2].DAGName != "b" {
+		t.Fatalf("dag_name missing: %+v", got)
+	}
+}
+
+func TestRunCarriesTaskCountsAndTaskNames(t *testing.T) {
+	c := newAPI(t)
+	d := c.createDAG("d")
+	t1, t2 := c.createTask(d.ID, "extract"), c.createTask(d.ID, "load")
+	c.addDependency(t2.ID, t1.ID)
+	trig := c.trigger(d.ID)
+
+	var run runFull
+	c.call("GET", "/runs/"+trig.Run.ID, nil, http.StatusOK, &run)
+	if run.TasksTotal != 2 || run.TasksDone != 0 {
+		t.Fatalf("fresh run counts = %d/%d, want 0/2", run.TasksDone, run.TasksTotal)
+	}
+
+	c.pool.Exec(context.Background(), `UPDATE task_instances SET status='success' WHERE run_id=$1 AND task_id=$2`, trig.Run.ID, t1.ID)
+	c.pool.Exec(context.Background(), `UPDATE task_instances SET status='skipped' WHERE run_id=$1 AND task_id=$2`, trig.Run.ID, t2.ID)
+	c.call("GET", "/runs/"+trig.Run.ID, nil, http.StatusOK, &run)
+	if run.TasksDone != 2 {
+		t.Fatalf("done = %d, want 2 (success + skipped count)", run.TasksDone)
+	}
+
+	var tis []struct {
+		TaskName string `json:"task_name"`
+	}
+	c.call("GET", "/runs/"+trig.Run.ID+"/task-instances", nil, http.StatusOK, &tis)
+	if len(tis) != 2 || tis[0].TaskName != "extract" || tis[1].TaskName != "load" {
+		t.Fatalf("task names = %+v, want [extract load] (sorted by name)", tis)
+	}
+}
+
+func TestGlobalRunListFiltersAndOrder(t *testing.T) {
+	c := newAPI(t)
+	a, b := c.createDAG("a"), c.createDAG("b")
+	c.createTask(a.ID, "t")
+	c.createTask(b.ID, "t")
+	r1 := c.triggerRun(a.ID)
+	r2 := c.triggerRun(b.ID)
+	r3 := c.triggerRun(a.ID)
+	c.finishRun(r2.ID, "failed", 5)
+
+	var all []runFull
+	c.call("GET", "/runs", nil, http.StatusOK, &all)
+	if len(all) != 3 || all[0].ID != r3.ID || all[2].ID != r1.ID {
+		t.Fatalf("want newest first [r3 r2 r1], got %+v", all)
+	}
+
+	var failed, ofA, limited []runFull
+	c.call("GET", "/runs?status=failed", nil, http.StatusOK, &failed)
+	c.call("GET", "/runs?dag_id="+a.ID, nil, http.StatusOK, &ofA)
+	c.call("GET", "/runs?limit=1", nil, http.StatusOK, &limited)
+	if len(failed) != 1 || failed[0].ID != r2.ID || len(ofA) != 2 || len(limited) != 1 {
+		t.Fatalf("filters wrong: failed=%d ofA=%d limited=%d", len(failed), len(ofA), len(limited))
+	}
+
+	c.expectStatus("GET", "/runs?status=bogus", nil, http.StatusBadRequest)
+	c.expectStatus("GET", "/runs?limit=0", nil, http.StatusBadRequest)
+	c.expectStatus("GET", "/runs?limit=999", nil, http.StatusBadRequest)
+	c.expectStatus("GET", "/runs?dag_id=nope", nil, http.StatusBadRequest)
+
+	var perDag []runFull
+	c.call("GET", "/dags/"+a.ID+"/runs", nil, http.StatusOK, &perDag)
+	if len(perDag) != 2 || perDag[0].ID != r3.ID {
+		t.Fatalf("per-DAG list should be newest first: %+v", perDag)
+	}
+}
+
+type dagSummaryResp struct {
+	ID                 string    `json:"id"`
+	LastRun            *runFull  `json:"last_run"`
+	SuccessRate        *float64  `json:"success_rate"`
+	AvgDurationSeconds *float64  `json:"avg_duration_seconds"`
+	RecentDurations    []float64 `json:"recent_durations"`
+}
+
+func TestDAGSummaryStats(t *testing.T) {
+	c := newAPI(t)
+	d := c.createDAG("d")
+	c.createTask(d.ID, "t")
+
+	var fresh dagSummaryResp
+	c.call("GET", "/dags/"+d.ID, nil, http.StatusOK, &fresh)
+	if fresh.LastRun != nil || fresh.SuccessRate != nil || fresh.AvgDurationSeconds != nil {
+		t.Fatalf("never-run DAG should have null stats: %+v", fresh)
+	}
+	if fresh.RecentDurations == nil || len(fresh.RecentDurations) != 0 {
+		t.Fatalf("recent_durations should be [], got %#v", fresh.RecentDurations)
+	}
+
+	// oldest to newest: success 10s, failed 20s, success 30s, then one still running
+	for _, step := range []struct {
+		status string
+		secs   float64
+	}{{"success", 10}, {"failed", 20}, {"success", 30}} {
+		c.finishRun(c.triggerRun(d.ID).ID, step.status, step.secs)
+	}
+	running := c.triggerRun(d.ID)
+
+	var got dagSummaryResp
+	c.call("GET", "/dags/"+d.ID, nil, http.StatusOK, &got)
+	if got.LastRun == nil || got.LastRun.ID != running.ID || got.LastRun.Number != 4 || got.LastRun.Status != "queued" {
+		t.Fatalf("last_run = %+v", got.LastRun)
+	}
+	if got.SuccessRate == nil || *got.SuccessRate < 0.66 || *got.SuccessRate > 0.67 {
+		t.Fatalf("success_rate = %v, want 2/3", got.SuccessRate)
+	}
+	if got.AvgDurationSeconds == nil || *got.AvgDurationSeconds < 19 || *got.AvgDurationSeconds > 21 {
+		t.Fatalf("avg_duration_seconds = %v, want about 20", got.AvgDurationSeconds)
+	}
+	if len(got.RecentDurations) != 3 || got.RecentDurations[0] > got.RecentDurations[2] { // 10, 20, 30
+		t.Fatalf("recent_durations = %v, want oldest to newest", got.RecentDurations)
+	}
+
+	var list []dagSummaryResp
+	c.call("GET", "/dags", nil, http.StatusOK, &list)
+	if len(list) != 1 || list[0].LastRun == nil {
+		t.Fatalf("list should carry the same summary: %+v", list)
+	}
+}
+
+func TestStats(t *testing.T) {
+	c := newAPI(t)
+	d := c.createDAG("d")
+	c.createTask(d.ID, "t")
+
+	var empty struct {
+		ActiveRuns    int      `json:"active_runs"`
+		SuccessRate   *float64 `json:"success_rate_24h"`
+		Failed24h     int      `json:"failed_24h"`
+		Throughput24h []int    `json:"throughput_24h"`
+	}
+	c.call("GET", "/stats", nil, http.StatusOK, &empty)
+	if empty.ActiveRuns != 0 || empty.SuccessRate != nil || len(empty.Throughput24h) != 24 {
+		t.Fatalf("empty stats = %+v", empty)
+	}
+
+	c.finishRun(c.triggerRun(d.ID).ID, "success", 5)
+	c.finishRun(c.triggerRun(d.ID).ID, "success", 5)
+	c.finishRun(c.triggerRun(d.ID).ID, "failed", 5)
+	c.triggerRun(d.ID) // stays queued
+
+	c.call("GET", "/stats", nil, http.StatusOK, &empty)
+	if empty.ActiveRuns != 1 || empty.Failed24h != 1 || empty.SuccessRate == nil || *empty.SuccessRate < 0.66 || *empty.SuccessRate > 0.67 {
+		t.Fatalf("stats = %+v", empty)
+	}
+	if empty.Throughput24h[23] != 3 { // the three finished runs landed in the current hour
+		t.Fatalf("throughput = %v, want 3 in the last bucket", empty.Throughput24h)
+	}
+}

@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/google/uuid"
@@ -14,12 +15,41 @@ type TaskInstanceHandler struct {
 	DB *pgxpool.Pool
 }
 
-const taskInstanceCols = `id, run_id, task_id, status, attempt, worker_id, started_at, finished_at, logs, output`
+// taskInstanceSelect reads an instance with its task's name. Callers append a WHERE / ORDER BY.
+const taskInstanceSelect = `
+	SELECT ti.id, ti.run_id, ti.task_id, t.name, ti.status, ti.attempt, ti.worker_id,
+	       ti.started_at, ti.finished_at, ti.logs, ti.output
+	FROM task_instances ti
+	JOIN tasks t ON t.id = ti.task_id`
 
-// scanTaskInstance reads taskInstanceCols from a pgx.Row or pgx.Rows.
+// scanTaskInstance reads the columns of taskInstanceSelect from a pgx.Row or pgx.Rows.
 func scanTaskInstance(row pgx.Row, ti *models.TaskInstance) error {
-	return row.Scan(&ti.ID, &ti.RunID, &ti.TaskID, &ti.Status, &ti.Attempt, &ti.WorkerID,
+	return row.Scan(&ti.ID, &ti.RunID, &ti.TaskID, &ti.TaskName, &ti.Status, &ti.Attempt, &ti.WorkerID,
 		&ti.StartedAt, &ti.FinishedAt, &ti.Logs, &ti.Output)
+}
+
+// querier is satisfied by both *pgxpool.Pool and pgx.Tx.
+type querier interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+}
+
+// queryTaskInstances returns instances matching where (e.g. "WHERE ti.run_id = $1"), ordered by task name.
+func queryTaskInstances(r *http.Request, q querier, where string, args ...any) ([]models.TaskInstance, error) {
+	rows, err := q.Query(r.Context(), taskInstanceSelect+" "+where+" ORDER BY t.name", args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := []models.TaskInstance{}
+	for rows.Next() {
+		var ti models.TaskInstance
+		if err := scanTaskInstance(rows, &ti); err != nil {
+			return nil, err
+		}
+		out = append(out, ti)
+	}
+	return out, rows.Err()
 }
 
 func NewTaskInstanceHandler(db *pgxpool.Pool) *TaskInstanceHandler {
@@ -36,33 +66,16 @@ func NewTaskInstanceHandler(db *pgxpool.Pool) *TaskInstanceHandler {
 // @Failure      500  {object}  map[string]string
 // @Router       /runs/{runId}/task-instances [get]
 func (h *TaskInstanceHandler) List(w http.ResponseWriter, r *http.Request) {
-	runID := r.PathValue("runId")
-	id, err := uuid.Parse(runID)
+	id, err := uuid.Parse(r.PathValue("runId"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid run id")
 		return
 	}
 
-	rows, err := h.DB.Query(r.Context(), `
-		SELECT `+taskInstanceCols+`
-		FROM task_instances
-		WHERE run_id = $1
-	`, id)
+	taskInstances, err := queryTaskInstances(r, h.DB, `WHERE ti.run_id = $1`, id)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to query task instances")
 		return
-	}
-	defer rows.Close()
-
-	taskInstances := []models.TaskInstance{}
-	for rows.Next() {
-		var ti models.TaskInstance
-		err := scanTaskInstance(rows, &ti)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to scan task instance")
-			return
-		}
-		taskInstances = append(taskInstances, ti)
 	}
 	writeJSON(w, http.StatusOK, taskInstances)
 }
@@ -78,21 +91,14 @@ func (h *TaskInstanceHandler) List(w http.ResponseWriter, r *http.Request) {
 // @Failure      500  {object}  map[string]string
 // @Router       /task-instances/{id} [get]
 func (h *TaskInstanceHandler) Get(w http.ResponseWriter, r *http.Request) {
-	idParam := r.PathValue("id")
-	id, err := uuid.Parse(idParam)
+	id, err := uuid.Parse(r.PathValue("id"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid task instance id")
 		return
 	}
 
-	row := h.DB.QueryRow(r.Context(), `
-		SELECT `+taskInstanceCols+`
-		FROM task_instances
-		WHERE id = $1
-	`, id)
-
 	var ti models.TaskInstance
-	err = scanTaskInstance(row, &ti)
+	err = scanTaskInstance(h.DB.QueryRow(r.Context(), taskInstanceSelect+` WHERE ti.id = $1`, id), &ti)
 	if err == pgx.ErrNoRows {
 		writeError(w, http.StatusNotFound, "task instance not found")
 		return

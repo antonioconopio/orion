@@ -11,6 +11,7 @@ import (
 	"github.com/rs/cors"
 
 	"orion-api/internal/db"
+	"orion-api/internal/events"
 	"orion-api/internal/handlers"
 	"orion-api/internal/queue"
 
@@ -55,14 +56,25 @@ func main() {
 		log.Fatalf("failed to create queue: %v", err)
 	}
 
+	// One Redis subscription fans live events out to every WebSocket client.
+	hub := events.NewHub()
+	if err := hub.Start(context.Background(), queue.Client()); err != nil {
+		log.Fatalf("failed to start event hub: %v", err)
+	}
+
+	uiOrigin := os.Getenv("UI_ORIGIN")
+	if uiOrigin == "" {
+		uiOrigin = "http://localhost:3000" // the Next.js dev server
+	}
+
 	mux := http.NewServeMux()
-	handlers.RegisterRoutes(mux, pool, queue)
+	handlers.RegisterRoutes(mux, pool, queue, hub, uiOrigin)
 
 	// Swagger docs endpoint
 	mux.Handle("GET /swagger/", httpSwagger.WrapHandler)
 
 	handler := cors.New(cors.Options{
-		AllowedOrigins: []string{"http://localhost:3000"}, // the Next.js dev server, not "*"
+		AllowedOrigins: []string{uiOrigin}, // not "*"
 		AllowedMethods: []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
 		AllowedHeaders: []string{"Content-Type"},
 	}).Handler(mux)

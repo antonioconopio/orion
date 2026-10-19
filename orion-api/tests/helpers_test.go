@@ -30,9 +30,13 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"orion-api/internal/db"
+	"orion-api/internal/events"
 	"orion-api/internal/handlers"
 	"orion-api/internal/queue"
 )
+
+// testUIOrigin is the browser origin the WebSocket accepts in tests.
+const testUIOrigin = "http://localhost:3000"
 
 const migrationGlob = "../../migrations/*.up.sql"
 
@@ -123,7 +127,7 @@ func ensureSchema(ctx context.Context, pool *pgxpool.Pool) (*pgxpool.Pool, error
 	// the newest column stands in for "schema is current"; otherwise rebuild the throwaway DB
 	var current bool
 	if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM information_schema.columns
-		WHERE table_name = 'task_instances' AND column_name = 'queued_at')`).Scan(&current); err != nil {
+		WHERE table_name = 'dags' AND column_name = 'run_counter')`).Scan(&current); err != nil {
 		return nil, err
 	}
 	if current {
@@ -157,6 +161,7 @@ type apiClient struct {
 	stream     *queue.Stream // the queue the API enqueues onto
 	streamName string
 	rc         *redis.Client // raw client for inspecting the stream
+	hub        *events.Hub
 }
 
 // testGroup is the consumer group used on every test stream.
@@ -175,11 +180,17 @@ func newAPI(t *testing.T) *apiClient {
 	if _, err := pool.Exec(context.Background(), `TRUNCATE dags, tasks, task_dependencies, runs, task_instances CASCADE`); err != nil {
 		t.Fatalf("truncate: %v", err)
 	}
+	hub := events.NewHub()
+	hubCtx, stopHub := context.WithCancel(context.Background())
+	t.Cleanup(stopHub)
+	if err := hub.Start(hubCtx, stream.Client()); err != nil {
+		t.Fatalf("hub.Start: %v", err)
+	}
 	mux := http.NewServeMux()
-	handlers.RegisterRoutes(mux, pool, stream)
+	handlers.RegisterRoutes(mux, pool, stream, hub, testUIOrigin)
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	return &apiClient{t: t, srv: srv, pool: pool, stream: stream, streamName: streamName, rc: rc}
+	return &apiClient{t: t, srv: srv, pool: pool, stream: stream, streamName: streamName, rc: rc, hub: hub}
 }
 
 // do sends a request. body may be nil, a string (sent raw) or any
