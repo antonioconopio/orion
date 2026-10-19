@@ -32,6 +32,7 @@ def process(pool, client, consumer_name, message_id, fields, reclaimed=False, hb
             task = db.get_task(cursor, instance_id)   # (type, config) or None
             python_version = db.get_python_version(cursor, instance_id)
             ids = db.get_run_and_dag(cursor, instance_id)
+            inputs = db.get_inputs(cursor, instance_id)   # parents' outputs, by task name
             conn.rollback()                                    # end the read transaction
 
             if ids:
@@ -42,7 +43,7 @@ def process(pool, client, consumer_name, message_id, fields, reclaimed=False, hb
                 result = executor.ExecResult(False, None, "", "task not found for instance")
             else:
                 try:
-                    result = executor.execute(*task, python_version)
+                    result = executor.execute(*task, python_version, inputs)
                 except Exception as e:
                     result = executor.ExecResult(False, None, "", f"executor crashed: {e!r}")
 
@@ -54,7 +55,7 @@ def process(pool, client, consumer_name, message_id, fields, reclaimed=False, hb
 
             # log is written in the same transaction as the status flip
             if result.success:
-                run_id = db.mark_success(cursor, instance_id, log)
+                run_id = db.mark_success(cursor, instance_id, log, result.output)
                 ready_tasks = db.claim_ready_tasks(cursor, instance_id)
             else:
                 run_id = db.mark_failed(cursor, instance_id, log)
