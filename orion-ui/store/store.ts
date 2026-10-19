@@ -2,11 +2,13 @@
 
 import { configureStore } from "@reduxjs/toolkit";
 import { api } from "./api";
+import connectionReducer from "./slices/connectionSlice";
 import dagReducer from "./slices/dagSlice";
 
 export const store = configureStore({
   reducer: {
     dagReducer,
+    connection: connectionReducer,
     [api.reducerPath]: api.reducer,
   },
   middleware: (getDefault) => getDefault().concat(api.middleware),
