@@ -1,4 +1,4 @@
-import { Cpu, MapPin, Timer } from "lucide-react";
+import { Cpu, Hash, Timer } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { WORKER_STATUS_STYLE } from "@/lib/status-style";
@@ -64,8 +64,8 @@ export function WorkerCard({ worker }: { worker: Worker }) {
           <span className="font-mono tabular-nums">{worker.uptime}</span>
         </div>
         <div className="flex items-center gap-1.5 text-muted-foreground">
-          <MapPin className="size-3.5" />
-          <span className="font-mono">{worker.region}</span>
+          <Hash className="size-3.5" />
+          <span className="font-mono">pid {worker.pid}</span>
         </div>
         <div className="flex items-center gap-1.5">
           <span className="text-muted-foreground">›</span>

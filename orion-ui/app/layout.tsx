@@ -28,6 +28,7 @@ export default function RootLayout({
     <html
       lang="en"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
+      suppressHydrationWarning // next-themes sets class/color-scheme on <html> before React hydrates
     >
       <body>
         <Providers>

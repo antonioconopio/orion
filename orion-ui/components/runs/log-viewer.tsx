@@ -38,9 +38,9 @@ export function LogViewer({
               {level.label}
             </span>
             <span className="w-44 shrink-0 truncate text-violet-300/70">
-              {line.taskId}
+              {line.taskName}
             </span>
-            <span className="min-w-0 text-foreground/85">{line.message}</span>
+            <span className="min-w-0 text-zinc-200">{line.message}</span>
           </div>
         );
       })}

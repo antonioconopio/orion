@@ -25,7 +25,7 @@ export function DagRow({ dag }: { dag: Dag }) {
             {dag.name}
           </span>
           <span className="truncate font-mono text-xs text-muted-foreground">
-            {dag.team} · {dag.schedule}
+            {dag.schedule}
           </span>
         </div>
       </div>
